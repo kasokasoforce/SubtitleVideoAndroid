@@ -36,14 +36,21 @@ object SrtCodec {
     }
 
     fun mergeTranslation(source: List<SubtitleEntry>, translatedRaw: String): List<SubtitleEntry> {
+        require(source.isNotEmpty()) { "元字幕がありません" }
         val translated = parse(translatedRaw)
-        val byId = translated.associateBy { it.index }
-        val allIdsPresent = source.all { byId.containsKey(it.index) }
-        require(allIdsPresent || source.size == translated.size) {
+        require(translated.size == source.size) {
             "字幕数が一致しません。元=${source.size}, 翻訳=${translated.size}"
         }
+
+        val sourceIds = source.map { it.index }
+        val translatedIds = translated.map { it.index }
+        require(sourceIds.distinct().size == sourceIds.size) { "元SRTに重複した字幕番号があります" }
+        require(translatedIds.distinct().size == translatedIds.size) { "翻訳SRTに重複した字幕番号があります" }
+
+        val sameIds = sourceIds.toSet() == translatedIds.toSet()
+        val byId = if (sameIds) translated.associateBy { it.index } else emptyMap()
         return source.mapIndexed { position, src ->
-            val tr = if (allIdsPresent) byId.getValue(src.index) else translated[position]
+            val tr = if (sameIds) byId.getValue(src.index) else translated[position]
             src.copy(text = tr.text.trim())
         }
     }
