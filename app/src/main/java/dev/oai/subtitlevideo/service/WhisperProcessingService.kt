@@ -61,7 +61,7 @@ class WhisperProcessingService : Service() {
         Messenger(Handler(Looper.getMainLooper()) { message ->
             if (message.what == MSG_START) {
                 client = message.replyTo
-                sendProgress(lastProgress, lastMessage)
+                updateProgress(lastProgress, lastMessage)
                 if (running.compareAndSet(false, true)) {
                     val data = message.data
                     val uri = data.getString(KEY_VIDEO_URI)?.let(Uri::parse)
