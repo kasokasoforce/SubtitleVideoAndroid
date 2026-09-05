@@ -1,0 +1,55 @@
+package dev.oai.subtitlevideo.settings
+
+import android.content.Context
+import dev.oai.subtitlevideo.model.WhisperModelSpec
+
+data class AppSettings(
+    val recognitionLanguageCode: String = "zh",
+    val recognitionLanguageLabel: String = "中国語",
+    val targetLanguageCode: String = "ja",
+    val targetLanguageLabel: String = "日本語",
+    val whisperModel: WhisperModelSpec = WhisperModelSpec.SMALL,
+    val subtitleTextScale: Float = 1.0f,
+    val subtitleBottomMarginPercent: Int = 6,
+    val maxLineChars: Int = 24,
+    val maxLines: Int = 2,
+    val shadowPercent: Int = 65,
+    val maxEventSeconds: Double = 4.0,
+) {
+    companion object {
+        private const val PREFS = "app_settings"
+
+        fun load(context: Context): AppSettings {
+            val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            return AppSettings(
+                recognitionLanguageCode = p.getString("recognitionLanguageCode", "zh") ?: "zh",
+                recognitionLanguageLabel = p.getString("recognitionLanguageLabel", "中国語") ?: "中国語",
+                targetLanguageCode = p.getString("targetLanguageCode", "ja") ?: "ja",
+                targetLanguageLabel = p.getString("targetLanguageLabel", "日本語") ?: "日本語",
+                whisperModel = WhisperModelSpec.fromId(p.getString("whisperModel", null)),
+                subtitleTextScale = p.getFloat("subtitleTextScale", 1.0f).coerceIn(0.7f, 1.6f),
+                subtitleBottomMarginPercent = p.getInt("subtitleBottomMarginPercent", 6).coerceIn(2, 20),
+                maxLineChars = p.getInt("maxLineChars", 24).coerceIn(12, 40),
+                maxLines = p.getInt("maxLines", 2).coerceIn(1, 3),
+                shadowPercent = p.getInt("shadowPercent", 65).coerceIn(0, 100),
+                maxEventSeconds = p.getFloat("maxEventSeconds", 4.0f).toDouble().coerceIn(1.5, 8.0),
+            )
+        }
+    }
+
+    fun save(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("recognitionLanguageCode", recognitionLanguageCode)
+            .putString("recognitionLanguageLabel", recognitionLanguageLabel)
+            .putString("targetLanguageCode", targetLanguageCode)
+            .putString("targetLanguageLabel", targetLanguageLabel)
+            .putString("whisperModel", whisperModel.id)
+            .putFloat("subtitleTextScale", subtitleTextScale)
+            .putInt("subtitleBottomMarginPercent", subtitleBottomMarginPercent)
+            .putInt("maxLineChars", maxLineChars)
+            .putInt("maxLines", maxLines)
+            .putInt("shadowPercent", shadowPercent)
+            .putFloat("maxEventSeconds", maxEventSeconds.toFloat())
+            .apply()
+    }
+}
