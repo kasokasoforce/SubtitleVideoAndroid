@@ -10,28 +10,28 @@ import java.security.MessageDigest
 
 class WhisperModelManager(private val context: Context) {
     companion object {
-        const val MODEL_FILE = "ggml-small.bin"
-        private const val EXPECTED_SHA256 = "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
-        private const val EXPECTED_SIZE_BYTES = 487_601_967L
-        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/c521a4b02f422512d734391fdf08bb08c0862f68/ggml-small.bin?download=true"
         private const val MAX_ATTEMPTS = 4
     }
 
-    val modelFile: File get() = File(context.filesDir, "models/$MODEL_FILE")
-    private val verificationMarker: File get() = File(context.filesDir, "models/$MODEL_FILE.sha256")
+    fun modelFile(spec: WhisperModelSpec): File = File(context.filesDir, "models/${spec.fileName}")
+    private fun verificationMarker(spec: WhisperModelSpec): File =
+        File(context.filesDir, "models/${spec.fileName}.sha256")
 
-    fun isReady(): Boolean = modelFile.isFile && modelFile.length() == EXPECTED_SIZE_BYTES &&
-        verificationMarker.readTextOrNull()?.trim()?.equals(EXPECTED_SHA256, ignoreCase = true) == true
+    fun isReady(spec: WhisperModelSpec): Boolean {
+        val file = modelFile(spec)
+        return file.isFile && file.length() == spec.expectedSizeBytes &&
+            verificationMarker(spec).readTextOrNull()?.trim()?.equals(spec.sha256, ignoreCase = true) == true
+    }
 
-    fun download(onProgress: (Int) -> Unit) {
-        val target = modelFile
+    fun download(spec: WhisperModelSpec, onProgress: (Int) -> Unit) {
+        val target = modelFile(spec)
         target.parentFile?.mkdirs()
-        val temp = File(target.parentFile, "$MODEL_FILE.part")
+        val temp = File(target.parentFile, "${spec.fileName}.part")
 
-        if (temp.exists() && temp.length() > EXPECTED_SIZE_BYTES) temp.delete()
-        if (temp.length() == EXPECTED_SIZE_BYTES) {
-            if (sha256(temp).equals(EXPECTED_SHA256, ignoreCase = true)) {
-                installVerified(temp, target)
+        if (temp.exists() && temp.length() > spec.expectedSizeBytes) temp.delete()
+        if (temp.length() == spec.expectedSizeBytes) {
+            if (sha256(temp).equals(spec.sha256, ignoreCase = true)) {
+                installVerified(spec, temp, target)
                 onProgress(100)
                 return
             }
@@ -41,26 +41,23 @@ class WhisperModelManager(private val context: Context) {
         var lastError: Throwable? = null
         repeat(MAX_ATTEMPTS) { attempt ->
             try {
-                downloadAttempt(temp, onProgress)
-                require(temp.length() == EXPECTED_SIZE_BYTES) {
-                    "モデルサイズが不完全です: ${temp.length()} / $EXPECTED_SIZE_BYTES bytes"
+                downloadAttempt(spec, temp, onProgress)
+                require(temp.length() == spec.expectedSizeBytes) {
+                    "モデルサイズが不完全です: ${temp.length()} / ${spec.expectedSizeBytes} bytes"
                 }
                 val actual = sha256(temp)
-                require(actual.equals(EXPECTED_SHA256, ignoreCase = true)) {
+                require(actual.equals(spec.sha256, ignoreCase = true)) {
                     "WhisperモデルのSHA-256が一致しません: $actual"
                 }
-                installVerified(temp, target)
+                installVerified(spec, temp, target)
                 onProgress(100)
                 return
             } catch (error: Throwable) {
                 lastError = error
                 if (error is InterruptedException || Thread.currentThread().isInterrupted) throw error
-
-                // SHA不一致やサイズ超過は壊れた部分ファイルを再利用しない。
-                if (temp.length() > EXPECTED_SIZE_BYTES || error.message?.contains("SHA-256") == true) {
+                if (temp.length() > spec.expectedSizeBytes || error.message?.contains("SHA-256") == true) {
                     temp.delete()
                 }
-
                 if (attempt < MAX_ATTEMPTS - 1) {
                     Thread.sleep(longArrayOf(1_000L, 3_000L, 7_000L)[attempt])
                 }
@@ -69,9 +66,9 @@ class WhisperModelManager(private val context: Context) {
         throw IOException("Whisperモデルのダウンロードに失敗しました: ${lastError?.message ?: "通信エラー"}", lastError)
     }
 
-    private fun downloadAttempt(temp: File, onProgress: (Int) -> Unit) {
-        var resumeFrom = temp.length().coerceIn(0L, EXPECTED_SIZE_BYTES)
-        val connection = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
+    private fun downloadAttempt(spec: WhisperModelSpec, temp: File, onProgress: (Int) -> Unit) {
+        var resumeFrom = temp.length().coerceIn(0L, spec.expectedSizeBytes)
+        val connection = (URL(spec.downloadUrl).openConnection() as HttpURLConnection).apply {
             connectTimeout = 20_000
             readTimeout = 60_000
             instanceFollowRedirects = true
@@ -86,14 +83,13 @@ class WhisperModelManager(private val context: Context) {
             val append = when {
                 code == HttpURLConnection.HTTP_PARTIAL -> true
                 code in 200..299 -> {
-                    // Rangeを無視して200が返った場合は先頭から取り直す。
                     if (resumeFrom > 0L) {
                         resumeFrom = 0L
                         temp.delete()
                     }
                     false
                 }
-                code == 416 && temp.length() == EXPECTED_SIZE_BYTES -> return
+                code == 416 && temp.length() == spec.expectedSizeBytes -> return
                 code == 416 -> {
                     temp.delete()
                     throw IOException("モデル再開位置が無効です (HTTP 416)")
@@ -101,7 +97,7 @@ class WhisperModelManager(private val context: Context) {
                 else -> throw IOException("モデル取得HTTP $code")
             }
 
-            onProgress(percentOf(resumeFrom))
+            onProgress(percentOf(resumeFrom, spec.expectedSizeBytes))
             connection.inputStream.use { input ->
                 FileOutputStream(temp, append).use { output ->
                     val buffer = ByteArray(1024 * 1024)
@@ -111,10 +107,8 @@ class WhisperModelManager(private val context: Context) {
                         if (count < 0) break
                         output.write(buffer, 0, count)
                         done += count
-                        if (done > EXPECTED_SIZE_BYTES) {
-                            throw IOException("モデル受信サイズが想定値を超えました")
-                        }
-                        onProgress(percentOf(done))
+                        if (done > spec.expectedSizeBytes) throw IOException("モデル受信サイズが想定値を超えました")
+                        onProgress(percentOf(done, spec.expectedSizeBytes))
                     }
                     output.fd.sync()
                 }
@@ -124,13 +118,13 @@ class WhisperModelManager(private val context: Context) {
         }
     }
 
-    private fun percentOf(bytes: Long): Int =
-        ((bytes.coerceIn(0L, EXPECTED_SIZE_BYTES) * 100L) / EXPECTED_SIZE_BYTES).toInt().coerceIn(0, 100)
+    private fun percentOf(bytes: Long, total: Long): Int =
+        ((bytes.coerceIn(0L, total) * 100L) / total).toInt().coerceIn(0, 100)
 
-    private fun installVerified(temp: File, target: File) {
+    private fun installVerified(spec: WhisperModelSpec, temp: File, target: File) {
         if (target.exists()) target.delete()
         require(temp.renameTo(target)) { "Whisperモデルを保存できませんでした" }
-        verificationMarker.writeText(EXPECTED_SHA256, Charsets.US_ASCII)
+        verificationMarker(spec).writeText(spec.sha256, Charsets.US_ASCII)
     }
 
     private fun File.readTextOrNull(): String? = runCatching { readText(Charsets.US_ASCII) }.getOrNull()
