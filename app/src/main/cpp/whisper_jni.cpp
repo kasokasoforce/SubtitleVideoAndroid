@@ -25,6 +25,51 @@ static std::string sanitize(const char *value) {
     return text;
 }
 
+static whisper_full_params make_params(const std::string &lang, int requestedThreads, bool tokenTimestamps) {
+    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    params.print_realtime = false;
+    params.print_progress = false;
+    params.print_timestamps = false;
+    params.print_special = false;
+    params.translate = false;
+    params.language = lang.c_str();
+    const int hw = static_cast<int>(std::thread::hardware_concurrency());
+    params.n_threads = std::max(1, std::min(requestedThreads, hw > 0 ? hw : 4));
+    params.no_context = false;
+    params.single_segment = false;
+    params.suppress_blank = true;
+    params.token_timestamps = tokenTimestamps;
+    if (tokenTimestamps) {
+        params.split_on_word = true;
+        params.max_len = 42;
+    }
+    return params;
+}
+
+static bool run_whisper(
+        JNIEnv *env,
+        whisper_context *ctx,
+        jfloatArray samples,
+        jstring language,
+        jint requestedThreads,
+        bool tokenTimestamps) {
+    const jsize count = env->GetArrayLength(samples);
+    jfloat *audio = env->GetFloatArrayElements(samples, nullptr);
+    const char *langChars = env->GetStringUTFChars(language, nullptr);
+    std::string lang(langChars ? langChars : "auto");
+    env->ReleaseStringUTFChars(language, langChars);
+
+    whisper_full_params params = make_params(lang, static_cast<int>(requestedThreads), tokenTimestamps);
+    const int result = whisper_full(ctx, params, audio, count);
+    env->ReleaseFloatArrayElements(samples, audio, JNI_ABORT);
+    if (result != 0) {
+        LOGE("whisper_full failed: %d", result);
+        throw_java(env, "Whisper文字起こしに失敗しました");
+        return false;
+    }
+    return true;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_oai_subtitlevideo_whisper_WhisperNative_nativeInit(
         JNIEnv *env, jobject, jstring modelPath) {
@@ -60,34 +105,7 @@ Java_dev_oai_subtitlevideo_whisper_WhisperNative_nativeTranscribe(
         throw_java(env, "Whisperコンテキストが無効です");
         return nullptr;
     }
-
-    const jsize count = env->GetArrayLength(samples);
-    jfloat *audio = env->GetFloatArrayElements(samples, nullptr);
-    const char *langChars = env->GetStringUTFChars(language, nullptr);
-    std::string lang(langChars ? langChars : "zh");
-    env->ReleaseStringUTFChars(language, langChars);
-
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.print_realtime = false;
-    params.print_progress = false;
-    params.print_timestamps = false;
-    params.print_special = false;
-    params.translate = false;
-    params.language = lang.c_str();
-    const int hw = static_cast<int>(std::thread::hardware_concurrency());
-    const int safeThreads = std::max(1, std::min(static_cast<int>(requestedThreads), hw > 0 ? hw : 4));
-    params.n_threads = safeThreads;
-    params.no_context = false;
-    params.single_segment = false;
-    params.suppress_blank = true;
-
-    const int result = whisper_full(ctx, params, audio, count);
-    env->ReleaseFloatArrayElements(samples, audio, JNI_ABORT);
-    if (result != 0) {
-        LOGE("whisper_full failed: %d", result);
-        throw_java(env, "Whisper文字起こしに失敗しました");
-        return nullptr;
-    }
+    if (!run_whisper(env, ctx, samples, language, requestedThreads, false)) return nullptr;
 
     std::ostringstream out;
     const int n = whisper_full_n_segments(ctx);
@@ -96,6 +114,36 @@ Java_dev_oai_subtitlevideo_whisper_WhisperNative_nativeTranscribe(
         const int64_t t1 = whisper_full_get_segment_t1(ctx, i) * 10;
         const std::string text = sanitize(whisper_full_get_segment_text(ctx, i));
         if (!text.empty()) out << t0 << '\t' << t1 << '\t' << text << '\n';
+    }
+    return env->NewStringUTF(out.str().c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_oai_subtitlevideo_whisper_WhisperNative_nativeTranscribeWords(
+        JNIEnv *env,
+        jobject,
+        jlong handle,
+        jfloatArray samples,
+        jstring language,
+        jint requestedThreads) {
+    auto *ctx = reinterpret_cast<whisper_context *>(handle);
+    if (ctx == nullptr) {
+        throw_java(env, "Whisperコンテキストが無効です");
+        return nullptr;
+    }
+    if (!run_whisper(env, ctx, samples, language, requestedThreads, true)) return nullptr;
+
+    std::ostringstream out;
+    const int segments = whisper_full_n_segments(ctx);
+    for (int i = 0; i < segments; ++i) {
+        const int tokens = whisper_full_n_tokens(ctx, i);
+        for (int j = 0; j < tokens; ++j) {
+            const whisper_token_data token = whisper_full_get_token_data(ctx, i, j);
+            if (token.t0 < 0 || token.t1 < 0 || token.t1 <= token.t0) continue;
+            const std::string text = sanitize(whisper_full_get_token_text(ctx, i, j));
+            if (text.empty()) continue;
+            out << (token.t0 * 10) << '\t' << (token.t1 * 10) << '\t' << text << '\n';
+        }
     }
     return env->NewStringUTF(out.str().c_str());
 }
