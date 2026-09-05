@@ -238,7 +238,7 @@ class MainActivity : Activity() {
             val eventSecs = 1.5 + seconds.seek.progress / 2.0
             size.value.text = "${"%.1f".format(textScale)}x"
             position.value.text = "$bottom%"
-            lineChars.value.text = "$chars文字"
+            lineChars.value.text = "${chars}文字"
             lines.value.text = "$maxLines 行"
             shadow.value.text = "$shadowPct%"
             seconds.value.text = "${"%.1f".format(eventSecs)}秒"
