@@ -8,4 +8,5 @@ internal object WhisperNative {
     external fun nativeInit(modelPath: String): Long
     external fun nativeFree(handle: Long)
     external fun nativeTranscribe(handle: Long, samples: FloatArray, language: String, threads: Int): String
+    external fun nativeTranscribeWords(handle: Long, samples: FloatArray, language: String, threads: Int): String
 }
