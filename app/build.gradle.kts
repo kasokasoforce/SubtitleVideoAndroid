@@ -58,6 +58,8 @@ dependencies {
     implementation("androidx.media3:media3-transformer:1.11.0")
     implementation("androidx.media3:media3-effect:1.11.0")
     implementation("androidx.media3:media3-common:1.11.0")
+    implementation("androidx.media3:media3-exoplayer:1.11.0")
+    implementation("androidx.media3:media3-ui:1.11.0")
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
     testImplementation("junit:junit:4.13.2")
