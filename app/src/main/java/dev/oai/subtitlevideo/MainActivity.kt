@@ -14,6 +14,8 @@ import android.view.Gravity
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -24,12 +26,14 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.util.UnstableApi
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
+import dev.oai.subtitlevideo.audio.SimpleVad
 import dev.oai.subtitlevideo.export.VideoExporter
 import dev.oai.subtitlevideo.model.WhisperModelManager
 import dev.oai.subtitlevideo.model.WhisperModelSpec
 import dev.oai.subtitlevideo.settings.AppSettings
 import dev.oai.subtitlevideo.srt.SrtCodec
 import dev.oai.subtitlevideo.srt.SubtitleEntry
+import dev.oai.subtitlevideo.translation.LocalTranslator
 import dev.oai.subtitlevideo.translation.TranslationShare
 import dev.oai.subtitlevideo.whisper.WhisperEngine
 import java.io.File
@@ -39,7 +43,7 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     companion object {
         private const val REQ_VIDEO = 1001
-        private const val REQ_JP_SRT = 1002
+        private const val REQ_TRANSLATED_SRT = 1002
         private const val PREFS = "current_project"
     }
 
@@ -52,20 +56,25 @@ class MainActivity : Activity() {
     private lateinit var projectText: TextView
     private lateinit var progress: ProgressBar
     private lateinit var settingsButton: Button
+    private lateinit var modelsButton: Button
     private lateinit var modelButton: Button
+    private lateinit var pauseButton: Button
+    private lateinit var cancelButton: Button
     private lateinit var videoButton: Button
     private lateinit var transcribeButton: Button
-    private lateinit var shareButton: Button
+    private lateinit var translateButton: Button
     private lateinit var importButton: Button
     private lateinit var pasteButton: Button
+    private lateinit var editButton: Button
     private lateinit var exportButton: Button
     private lateinit var playButton: Button
 
     private var videoUri: Uri? = null
     private var baseName: String = "video"
     private var sourceEntries: List<SubtitleEntry>? = null
-    private var japaneseEntries: List<SubtitleEntry>? = null
+    private var translatedEntries: List<SubtitleEntry>? = null
     private var outputUri: Uri? = null
+    private var downloadControl: WhisperModelManager.DownloadControl? = null
     @Volatile private var busy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,7 +121,7 @@ class MainActivity : Activity() {
             textSize = 26f
         })
         content.addView(TextView(this).apply {
-            text = "動画 → 端末内Whisper → ChatGPT翻訳 → 字幕焼き込み"
+            text = "動画 → 端末内Whisper → ChatGPT / 端末内翻訳 → 字幕焼き込み"
             textSize = 14f
             setPadding(0, dp(6), 0, dp(14))
         })
@@ -132,20 +141,27 @@ class MainActivity : Activity() {
         }
 
         settingsButton = actionButton("設定 / 字幕プレビュー", ::showSettings)
+        modelsButton = actionButton("Whisperモデル管理", ::showModelManager)
         modelButton = actionButton("1. Whisperモデルを準備", ::downloadModel)
+        pauseButton = actionButton("ダウンロードを一時停止", ::toggleDownloadPause)
+        cancelButton = actionButton("ダウンロードをキャンセル", ::cancelDownload)
         videoButton = actionButton("2. 動画を選択", ::chooseVideo)
         transcribeButton = actionButton("3. 字幕を作成", ::transcribe)
-        shareButton = actionButton("4. ChatGPTで翻訳", ::shareForTranslation)
-        importButton = actionButton("5. 翻訳SRTファイルを読み込む", ::chooseJapaneseSrt)
-        pasteButton = actionButton("5b. ChatGPT回答をクリップボードから取込", ::pasteJapaneseSrt)
+        translateButton = actionButton("4. 翻訳", ::translate)
+        importButton = actionButton("5. 翻訳SRTファイルを読み込む", ::chooseTranslatedSrt)
+        pasteButton = actionButton("5b. ChatGPT回答をクリップボードから取込", ::pasteTranslatedSrt)
+        editButton = actionButton("字幕を確認 / 修正", ::editTranslatedSrt)
         exportButton = actionButton("6. 字幕動画を作成", ::exportVideo)
         playButton = actionButton("完成動画を再生 / 共有", ::playOutput)
 
         content.addView(projectText)
         content.addView(progress)
         content.addView(statusText)
-        listOf(settingsButton, modelButton, videoButton, transcribeButton, shareButton, importButton, pasteButton, exportButton, playButton)
-            .forEach(content::addView)
+        listOf(
+            settingsButton, modelsButton, modelButton, pauseButton, cancelButton,
+            videoButton, transcribeButton, translateButton, importButton, pasteButton,
+            editButton, exportButton, playButton,
+        ).forEach(content::addView)
 
         setContentView(ScrollView(this).apply {
             addView(content)
@@ -176,15 +192,21 @@ class MainActivity : Activity() {
             textSize = 18f
             setShadowLayer(3f, 0f, 2f, Color.BLACK)
         }
-        preview.addView(previewSubtitle, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM,
-        ))
+        preview.addView(
+            previewSubtitle,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM,
+            ),
+        )
         root.addView(preview)
 
         fun spinner(label: String, labels: List<String>, selected: Int): Spinner {
-            root.addView(TextView(this).apply { text = label })
+            root.addView(TextView(this).apply {
+                text = label
+                setPadding(0, dp(8), 0, 0)
+            })
             return Spinner(this).also { sp ->
                 sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
                 sp.setSelection(selected.coerceIn(0, labels.lastIndex))
@@ -192,31 +214,52 @@ class MainActivity : Activity() {
             }
         }
 
-        val recognitionLabels = listOf("自動判定", "中国語", "英語", "韓国語", "日本語")
-        val recognitionCodes = listOf("auto", "zh", "en", "ko", "ja")
-        val recognitionIndex = recognitionCodes.indexOf(settings.recognitionLanguageCode).takeIf { it >= 0 } ?: 1
-        val recognitionSpinner = spinner("認識する音声言語", recognitionLabels, recognitionIndex)
+        val languageLabels = listOf(
+            "自動判定", "中国語", "英語", "韓国語", "日本語", "スペイン語", "フランス語",
+            "ドイツ語", "ポルトガル語", "ロシア語", "アラビア語", "ヒンディー語", "ベトナム語",
+        )
+        val languageCodes = listOf("auto", "zh", "en", "ko", "ja", "es", "fr", "de", "pt", "ru", "ar", "hi", "vi")
+        val recognitionIndex = languageCodes.indexOf(settings.recognitionLanguageCode).takeIf { it >= 0 } ?: 1
+        val recognitionSpinner = spinner("認識する音声言語", languageLabels, recognitionIndex)
 
-        val targetLabels = listOf("日本語", "英語", "中国語", "韓国語")
-        val targetCodes = listOf("ja", "en", "zh", "ko")
-        val targetIndex = targetCodes.indexOf(settings.targetLanguageCode).takeIf { it >= 0 } ?: 0
+        val targetLabels = languageLabels.drop(1)
+        val targetCodes = languageCodes.drop(1)
+        val targetIndex = targetCodes.indexOf(settings.targetLanguageCode).takeIf { it >= 0 } ?: 3
         val targetSpinner = spinner("翻訳先", targetLabels, targetIndex)
+
+        val translationLabels = listOf("ChatGPT（品質優先）", "端末内 ML Kit（完全無料）")
+        val translationModes = listOf("chatgpt", "local")
+        val translationSpinner = spinner(
+            "翻訳方法",
+            translationLabels,
+            translationModes.indexOf(settings.translationMode).takeIf { it >= 0 } ?: 0,
+        )
 
         val models = WhisperModelSpec.entries.toList()
         val modelSpinner = spinner("Whisperモデル", models.map { it.displayName }, models.indexOf(settings.whisperModel))
 
+        val wordTiming = CheckBox(this).apply {
+            text = "単語タイムスタンプで自然に字幕を分割（推奨）"
+            isChecked = settings.wordTimingEnabled
+        }
+        val vad = CheckBox(this).apply {
+            text = "長尺高速化: 無音を飛ばすVAD（精度優先ならOFF）"
+            isChecked = settings.vadEnabled
+        }
+        root.addView(wordTiming)
+        root.addView(vad)
+
         data class SliderRow(val seek: SeekBar, val value: TextView)
-        fun slider(label: String, max: Int, progress: Int): SliderRow {
-            val title = TextView(this).apply {
+        fun slider(label: String, max: Int, initial: Int): SliderRow {
+            root.addView(TextView(this).apply {
                 text = label
                 setPadding(0, dp(8), 0, 0)
-            }
+            })
             val value = TextView(this)
             val seek = SeekBar(this).apply {
                 this.max = max
-                this.progress = progress.coerceIn(0, max)
+                progress = initial.coerceIn(0, max)
             }
-            root.addView(title)
             root.addView(value)
             root.addView(seek)
             return SliderRow(seek, value)
@@ -249,8 +292,11 @@ class MainActivity : Activity() {
             params.bottomMargin = dp((180 * bottom / 100f).toInt())
             previewSubtitle.layoutParams = params
             previewSubtitle.maxLines = maxLines
-            previewSubtitle.text = if (chars < 22) "字幕の見本です。長い文章は\n設定した文字数で折り返します" else
+            previewSubtitle.text = if (chars < 22) {
+                "字幕の見本です。長い文章は\n設定した文字数で折り返します"
+            } else {
                 "字幕はこのくらいの大きさで表示されます\n前後の会話に合わせて自然に翻訳"
+            }
         }
         val listener = object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) = updatePreview()
@@ -260,6 +306,12 @@ class MainActivity : Activity() {
         listOf(size, position, lineChars, lines, shadow, seconds).forEach { it.seek.setOnSeekBarChangeListener(listener) }
         updatePreview()
 
+        root.addView(TextView(this).apply {
+            text = "端末内翻訳はML Kitを使用します。初回のみ翻訳モデルをダウンロードし、その後の翻訳は端末内で実行します。"
+            textSize = 12f
+            setPadding(0, dp(12), 0, 0)
+        })
+
         AlertDialog.Builder(this)
             .setTitle("設定 / 字幕プレビュー")
             .setView(ScrollView(this).apply { addView(root) })
@@ -267,12 +319,15 @@ class MainActivity : Activity() {
             .setPositiveButton("保存") { _, _ ->
                 val r = recognitionSpinner.selectedItemPosition
                 val t = targetSpinner.selectedItemPosition
-                settings = AppSettings(
-                    recognitionLanguageCode = recognitionCodes[r],
-                    recognitionLanguageLabel = recognitionLabels[r],
+                settings = settings.copy(
+                    recognitionLanguageCode = languageCodes[r],
+                    recognitionLanguageLabel = languageLabels[r],
                     targetLanguageCode = targetCodes[t],
                     targetLanguageLabel = targetLabels[t],
+                    translationMode = translationModes[translationSpinner.selectedItemPosition],
                     whisperModel = models[modelSpinner.selectedItemPosition],
+                    vadEnabled = vad.isChecked,
+                    wordTimingEnabled = wordTiming.isChecked,
                     subtitleTextScale = 0.7f + size.seek.progress / 100f,
                     subtitleBottomMarginPercent = 2 + position.seek.progress,
                     maxLineChars = 12 + lineChars.seek.progress,
@@ -281,9 +336,46 @@ class MainActivity : Activity() {
                     maxEventSeconds = 1.5 + seconds.seek.progress / 2.0,
                 )
                 settings.save(this)
-                setStatus("設定を保存しました。モデルを変更した場合は、そのモデルを準備してください。")
+                setStatus("設定を保存しました。")
                 refreshUi()
             }
+            .show()
+    }
+
+    private fun showModelManager() {
+        if (busy) return
+        val models = WhisperModelSpec.entries.toList()
+        val labels = models.map { spec ->
+            val bytes = modelManager.downloadedBytes(spec)
+            when {
+                modelManager.isReady(spec) -> "✓ ${spec.displayName} / 準備済み"
+                bytes > 0 -> "◐ ${spec.displayName} / ${(bytes / 1_000_000)}MBまで取得"
+                else -> "○ ${spec.displayName} / 未取得"
+            }
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Whisperモデル管理")
+            .setItems(labels) { _, index ->
+                val spec = models[index]
+                if (modelManager.isReady(spec) || modelManager.downloadedBytes(spec) > 0) {
+                    AlertDialog.Builder(this)
+                        .setTitle(spec.displayName)
+                        .setMessage("このモデルの保存データを削除しますか？")
+                        .setNegativeButton("キャンセル", null)
+                        .setPositiveButton("削除") { _, _ ->
+                            modelManager.delete(spec)
+                            setStatus("${spec.displayName} を削除しました。")
+                            refreshUi()
+                        }
+                        .show()
+                } else {
+                    settings = settings.copy(whisperModel = spec)
+                    settings.save(this)
+                    setStatus("${spec.displayName} を選択しました。「Whisperモデルを準備」で取得できます。")
+                    refreshUi()
+                }
+            }
+            .setNegativeButton("閉じる", null)
             .show()
     }
 
@@ -294,19 +386,55 @@ class MainActivity : Activity() {
             setStatus("${spec.displayName} は準備済みです。")
             return
         }
+        val control = WhisperModelManager.DownloadControl()
+        downloadControl = control
         setBusy(true, "${spec.displayName} をダウンロードしています。")
         worker.execute {
             runCatching {
-                modelManager.download(spec) { percent ->
-                    runOnUiThread { setProgress(percent, "Whisperモデル: $percent% (${spec.sizeMb}MB)") }
+                modelManager.download(spec, control) { state ->
+                    runOnUiThread {
+                        val doneMb = state.downloadedBytes / 1_000_000.0
+                        val totalMb = state.totalBytes / 1_000_000.0
+                        val speed = state.bytesPerSecond / 1_000_000.0
+                        setProgress(
+                            state.percent,
+                            "Whisperモデル: ${state.percent}%  ${"%.1f".format(doneMb)}/${"%.1f".format(totalMb)}MB" +
+                                if (speed > 0) "  ${"%.1f".format(speed)}MB/s" else "",
+                        )
+                    }
                 }
             }.onSuccess {
                 runOnUiThread {
+                    downloadControl = null
                     setBusy(false, "Whisperモデルの準備が完了しました。")
                     refreshUi()
                 }
-            }.onFailure(::showBackgroundError)
+            }.onFailure { error ->
+                runOnUiThread {
+                    downloadControl = null
+                    if (error is InterruptedException) setBusy(false, "ダウンロードを停止しました。途中データは次回再開に使います。")
+                    else setBusy(false, "モデル取得に失敗しました: ${error.message}")
+                    refreshUi()
+                }
+            }
         }
+    }
+
+    private fun toggleDownloadPause() {
+        val control = downloadControl ?: return
+        if (control.isPaused()) {
+            control.resume()
+            setStatus("ダウンロードを再開しました。")
+        } else {
+            control.pause()
+            setStatus("ダウンロードを一時停止しました。")
+        }
+        refreshUi()
+    }
+
+    private fun cancelDownload() {
+        downloadControl?.cancel()
+        setStatus("ダウンロードを停止しています。途中データは保持します。")
     }
 
     private fun chooseVideo() {
@@ -325,7 +453,7 @@ class MainActivity : Activity() {
         if (busy) return
         setBusy(true, "動画の音声を解析しています。")
         sourceEntries = null
-        japaneseEntries = null
+        translatedEntries = null
         clearSubtitleFiles()
 
         worker.execute {
@@ -338,9 +466,23 @@ class MainActivity : Activity() {
                             setProgress((percent * 15) / 100, "音声デコード中: $percent%")
                         } },
                     ) { samples, chunkStartMs ->
-                        val minute = chunkStartMs / 60_000
-                        runOnUiThread { setStatus("Whisperで文字起こし中: ${minute}分付近") }
-                        all += whisper.transcribe(samples, chunkStartMs, language = settings.recognitionLanguageCode)
+                        val windows = if (settings.vadEnabled) SimpleVad.split(samples)
+                        else listOf(SimpleVad.SpeechWindow(samples, 0L))
+                        windows.forEachIndexed { index, window ->
+                            val minute = (chunkStartMs + window.offsetMs) / 60_000
+                            runOnUiThread {
+                                setStatus(
+                                    "Whisperで文字起こし中: ${minute}分付近" +
+                                        if (settings.vadEnabled) " / 音声区間 ${index + 1}/${windows.size}" else "",
+                                )
+                            }
+                            all += whisper.transcribe(
+                                samples = window.samples,
+                                chunkStartMs = chunkStartMs + window.offsetMs,
+                                language = settings.recognitionLanguageCode,
+                                wordTiming = settings.wordTimingEnabled,
+                            )
+                        }
                     }
                 }
                 val normalized = all
@@ -353,7 +495,34 @@ class MainActivity : Activity() {
             }.onSuccess { result ->
                 runOnUiThread {
                     sourceEntries = result
-                    setBusy(false, "字幕を作成しました: ${result.size}ブロック\n次は「ChatGPTで翻訳」を押してください。")
+                    val next = if (settings.translationMode == "local") "端末内で翻訳" else "ChatGPTで翻訳"
+                    setBusy(false, "字幕を作成しました: ${result.size}ブロック\n次は「$next」を押してください。")
+                    refreshUi()
+                }
+            }.onFailure(::showBackgroundError)
+        }
+    }
+
+    private fun translate() {
+        if (settings.translationMode == "local") translateLocally() else shareForTranslation()
+    }
+
+    private fun translateLocally() {
+        val source = sourceEntries ?: return setStatus("先に字幕を作成してください。")
+        if (busy) return
+        setBusy(true, "端末内翻訳モデルを準備しています。初回のみダウンロードが必要です。")
+        worker.execute {
+            runCatching {
+                LocalTranslator(settings.recognitionLanguageCode, settings.targetLanguageCode).use { translator ->
+                    translator.translate(source) { percent ->
+                        runOnUiThread { setProgress(percent, "端末内で${settings.targetLanguageLabel}へ翻訳中: $percent%") }
+                    }
+                }
+            }.onSuccess { translated ->
+                runOnUiThread {
+                    translatedEntries = translated
+                    saveTranslated(translated)
+                    setBusy(false, "端末内翻訳が完了しました: ${translated.size}ブロック\nAPI課金なし・以後はダウンロード済みモデルで翻訳できます。")
                     refreshUi()
                 }
             }.onFailure(::showBackgroundError)
@@ -369,10 +538,10 @@ class MainActivity : Activity() {
             settings.targetLanguageLabel,
         )
         TranslationShare.shareToChatGpt(this, request, settings.targetLanguageLabel)
-        setStatus("ChatGPTに${settings.targetLanguageLabel}への翻訳依頼を送ります。\n返答はSRTファイル、共有、またはクリップボードで戻せます。")
+        setStatus("ChatGPTに${settings.targetLanguageLabel}への翻訳依頼を送ります。返答はSRTファイル、共有、またはクリップボードで戻せます。")
     }
 
-    private fun chooseJapaneseSrt() {
+    private fun chooseTranslatedSrt() {
         if (sourceEntries == null) return setStatus("元字幕がありません。先に文字起こししてください。")
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -380,40 +549,58 @@ class MainActivity : Activity() {
             putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/x-subrip", "text/plain", "text/*"))
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivityForResult(intent, REQ_JP_SRT)
+        startActivityForResult(intent, REQ_TRANSLATED_SRT)
     }
 
-    private fun importJapaneseSrt(uri: Uri) {
+    private fun importTranslatedSrt(uri: Uri) {
         runCatching {
             contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
                 ?: error("翻訳SRTを読み込めません")
-        }.onSuccess(::importJapaneseText)
+        }.onSuccess(::importTranslatedText)
             .onFailure { setStatus("翻訳SRTの読込に失敗しました: ${it.message}") }
     }
 
-    private fun pasteJapaneseSrt() {
+    private fun pasteTranslatedSrt() {
         if (sourceEntries == null) return setStatus("元字幕がありません。先に文字起こししてください。")
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
         if (text.isNullOrBlank()) return setStatus("クリップボードにテキストがありません。")
-        importJapaneseText(text)
+        importTranslatedText(text)
     }
 
-    private fun importJapaneseText(raw: String) {
+    private fun importTranslatedText(raw: String) {
         val source = sourceEntries ?: return setStatus("元字幕がないため翻訳結果を取り込めません。")
         runCatching { SrtCodec.mergeTranslation(source, raw) }
             .onSuccess { merged ->
-                japaneseEntries = merged
-                saveJapanese(merged)
+                translatedEntries = merged
+                saveTranslated(merged)
                 setStatus("${settings.targetLanguageLabel}字幕を取り込みました: ${merged.size}ブロック\n時刻は元のWhisper字幕を保持します。")
                 refreshUi()
             }
             .onFailure { setStatus("翻訳SRTの取込に失敗しました: ${it.message}") }
     }
 
+    private fun editTranslatedSrt() {
+        val translated = translatedEntries ?: return setStatus("翻訳字幕がありません。")
+        val editor = EditText(this).apply {
+            setText(SrtCodec.format(translated))
+            setTextSize(13f)
+            gravity = Gravity.TOP or Gravity.START
+            minLines = 18
+            isSingleLine = false
+            setHorizontallyScrolling(false)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("字幕を確認 / 修正")
+            .setView(ScrollView(this).apply { addView(editor) })
+            .setNegativeButton("キャンセル", null)
+            .setPositiveButton("保存") { _, _ -> importTranslatedText(editor.text.toString()) }
+            .show()
+    }
+
     private fun exportVideo() {
         val uri = videoUri ?: return setStatus("動画が選択されていません。")
-        val translated = japaneseEntries ?: return setStatus("翻訳SRTを先に読み込んでください。")
+        val translated = translatedEntries ?: return setStatus("翻訳字幕を先に作成してください。")
         if (busy) return
         setBusy(true, "字幕付きMP4を作成しています。")
         exporter.export(
@@ -445,7 +632,7 @@ class MainActivity : Activity() {
             .onFailure { setStatus("動画を開けませんでした: ${it.message}") }
     }
 
-    @Deprecated("Legacy result API kept intentionally to avoid extra UI dependencies in v0.1")
+    @Deprecated("Legacy result API kept intentionally to avoid extra UI dependencies")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) return
@@ -456,14 +643,14 @@ class MainActivity : Activity() {
                 videoUri = uri
                 baseName = queryName(uri).substringBeforeLast('.').ifBlank { "video" }
                 sourceEntries = null
-                japaneseEntries = null
+                translatedEntries = null
                 outputUri = null
                 clearSubtitleFiles()
                 persistProject()
                 setStatus("動画を選択しました。")
                 refreshUi()
             }
-            REQ_JP_SRT -> importJapaneseSrt(uri)
+            REQ_TRANSLATED_SRT -> importTranslatedSrt(uri)
         }
     }
 
@@ -471,7 +658,7 @@ class MainActivity : Activity() {
         if (intent?.action != Intent.ACTION_SEND || sourceEntries == null) return
         val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
         if (!sharedText.isNullOrBlank() && sharedText.contains("-->")) {
-            importJapaneseText(sharedText)
+            importTranslatedText(sharedText)
             return
         }
         val uri = if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -479,7 +666,7 @@ class MainActivity : Activity() {
         } else {
             @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
         }
-        if (uri != null) importJapaneseSrt(uri)
+        if (uri != null) importTranslatedSrt(uri)
     }
 
     private fun saveSource(entries: List<SubtitleEntry>) {
@@ -487,9 +674,9 @@ class MainActivity : Activity() {
         sourceFile().writeText(SrtCodec.format(entries), Charsets.UTF_8)
     }
 
-    private fun saveJapanese(entries: List<SubtitleEntry>) {
+    private fun saveTranslated(entries: List<SubtitleEntry>) {
         projectDir().mkdirs()
-        japaneseFile().writeText(SrtCodec.format(entries), Charsets.UTF_8)
+        translatedFile().writeText(SrtCodec.format(entries), Charsets.UTF_8)
         persistProject()
     }
 
@@ -499,7 +686,7 @@ class MainActivity : Activity() {
         baseName = prefs.getString("baseName", "video") ?: "video"
         outputUri = prefs.getString("outputUri", null)?.let(Uri::parse)
         sourceEntries = runCatching { if (sourceFile().isFile) SrtCodec.parse(sourceFile().readText()) else null }.getOrNull()
-        japaneseEntries = runCatching { if (japaneseFile().isFile) SrtCodec.parse(japaneseFile().readText()) else null }.getOrNull()
+        translatedEntries = runCatching { if (translatedFile().isFile) SrtCodec.parse(translatedFile().readText()) else null }.getOrNull()
     }
 
     private fun persistProject() {
@@ -512,10 +699,11 @@ class MainActivity : Activity() {
 
     private fun projectDir() = File(filesDir, "current")
     private fun sourceFile() = File(projectDir(), "source.srt")
-    private fun japaneseFile() = File(projectDir(), "translated.srt")
+    private fun translatedFile() = File(projectDir(), "translated.srt")
+
     private fun clearSubtitleFiles() {
         sourceFile().delete()
-        japaneseFile().delete()
+        translatedFile().delete()
         File(projectDir(), "source.zh.srt").delete()
         File(projectDir(), "jp.srt").delete()
     }
@@ -548,26 +736,44 @@ class MainActivity : Activity() {
     private fun refreshUi() {
         val hasVideo = videoUri != null
         val modelReady = runCatching { modelManager.isReady(settings.whisperModel) }.getOrDefault(false)
+        val isDownloading = downloadControl != null
+        val local = settings.translationMode == "local"
+
         modelButton.text = if (modelReady) "1. Whisperモデル: 準備済み (${settings.whisperModel.id})"
         else "1. Whisperモデルを準備 (${settings.whisperModel.sizeMb}MB)"
+        pauseButton.text = if (downloadControl?.isPaused() == true) "ダウンロードを再開" else "ダウンロードを一時停止"
+        pauseButton.visibility = if (isDownloading) View.VISIBLE else View.GONE
+        cancelButton.visibility = if (isDownloading) View.VISIBLE else View.GONE
         transcribeButton.text = "3. ${settings.recognitionLanguageLabel}字幕を作成"
-        shareButton.text = "4. ChatGPTで${settings.targetLanguageLabel}化"
+        translateButton.text = if (local) "4. 端末内で${settings.targetLanguageLabel}へ翻訳（無料）"
+        else "4. ChatGPTで${settings.targetLanguageLabel}へ翻訳"
+        importButton.visibility = if (local) View.GONE else View.VISIBLE
+        pasteButton.visibility = if (local) View.GONE else View.VISIBLE
         exportButton.text = "6. ${settings.targetLanguageLabel}字幕動画を作成"
+
         projectText.text = buildString {
             append("動画: ").append(if (hasVideo) baseName else "未選択")
             append("\nWhisper: ").append(settings.whisperModel.id).append(if (modelReady) " / 準備済み" else " / 未準備")
-            append("\n音声: ").append(settings.recognitionLanguageLabel).append(" → 翻訳: ").append(settings.targetLanguageLabel)
-            append("\n元字幕: ").append(sourceEntries?.size ?: 0).append("件 / 翻訳字幕: ").append(japaneseEntries?.size ?: 0).append("件")
+            append("\n音声: ").append(settings.recognitionLanguageLabel).append(" → ").append(settings.targetLanguageLabel)
+            append(" / 翻訳: ").append(if (local) "端末内無料" else "ChatGPT")
+            append("\n単語タイムスタンプ: ").append(if (settings.wordTimingEnabled) "ON" else "OFF")
+            append(" / VAD: ").append(if (settings.vadEnabled) "ON" else "OFF")
+            append("\n元字幕: ").append(sourceEntries?.size ?: 0).append("件 / 翻訳字幕: ").append(translatedEntries?.size ?: 0).append("件")
         }
+
         settingsButton.isEnabled = !busy
+        modelsButton.isEnabled = !busy
         modelButton.isEnabled = !busy
         videoButton.isEnabled = !busy
         transcribeButton.isEnabled = !busy && hasVideo && modelReady
-        shareButton.isEnabled = !busy && sourceEntries != null
+        translateButton.isEnabled = !busy && sourceEntries != null
         importButton.isEnabled = !busy && sourceEntries != null
         pasteButton.isEnabled = !busy && sourceEntries != null
-        exportButton.isEnabled = !busy && hasVideo && japaneseEntries != null
+        editButton.isEnabled = !busy && translatedEntries != null
+        exportButton.isEnabled = !busy && hasVideo && translatedEntries != null
         playButton.isEnabled = !busy && outputUri != null
+        pauseButton.isEnabled = isDownloading
+        cancelButton.isEnabled = isDownloading
     }
 
     private fun showBackgroundError(error: Throwable) {
