@@ -1,6 +1,7 @@
 package dev.oai.subtitlevideo.model
 
 import android.content.Context
+import dev.oai.subtitlevideo.service.ProcessingGuardService
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -61,51 +62,56 @@ class WhisperModelManager(private val context: Context) {
         control: DownloadControl = DownloadControl(),
         onProgress: (DownloadProgress) -> Unit,
     ) {
-        val target = modelFile(spec)
-        target.parentFile?.mkdirs()
-        val temp = partialFile(spec)
+        ProcessingGuardService.start(context, "Whisperモデルをダウンロード中")
+        try {
+            val target = modelFile(spec)
+            target.parentFile?.mkdirs()
+            val temp = partialFile(spec)
 
-        if (temp.exists() && temp.length() > spec.expectedSizeBytes) temp.delete()
-        if (temp.length() == spec.expectedSizeBytes) {
-            if (sha256(temp).equals(spec.sha256, ignoreCase = true)) {
-                installVerified(spec, temp, target)
-                onProgress(DownloadProgress(100, spec.expectedSizeBytes, spec.expectedSizeBytes, 0))
-                return
+            if (temp.exists() && temp.length() > spec.expectedSizeBytes) temp.delete()
+            if (temp.length() == spec.expectedSizeBytes) {
+                if (sha256(temp).equals(spec.sha256, ignoreCase = true)) {
+                    installVerified(spec, temp, target)
+                    onProgress(DownloadProgress(100, spec.expectedSizeBytes, spec.expectedSizeBytes, 0))
+                    return
+                }
+                temp.delete()
             }
-            temp.delete()
-        }
 
-        var lastError: Throwable? = null
-        repeat(MAX_ATTEMPTS) { attempt ->
-            try {
-                control.awaitIfPaused()
-                downloadAttempt(spec, temp, control, onProgress)
-                require(temp.length() == spec.expectedSizeBytes) {
-                    "モデルサイズが不完全です: ${temp.length()} / ${spec.expectedSizeBytes} bytes"
-                }
-                val actual = sha256(temp)
-                require(actual.equals(spec.sha256, ignoreCase = true)) {
-                    "WhisperモデルのSHA-256が一致しません: $actual"
-                }
-                installVerified(spec, temp, target)
-                onProgress(DownloadProgress(100, spec.expectedSizeBytes, spec.expectedSizeBytes, 0))
-                return
-            } catch (error: Throwable) {
-                lastError = error
-                if (error is InterruptedException || Thread.currentThread().isInterrupted) throw error
-                if (temp.length() > spec.expectedSizeBytes || error.message?.contains("SHA-256") == true) temp.delete()
-                if (attempt < MAX_ATTEMPTS - 1) {
-                    var waited = 0L
-                    val waitMs = longArrayOf(1_000L, 3_000L, 7_000L)[attempt]
-                    while (waited < waitMs) {
-                        control.awaitIfPaused()
-                        Thread.sleep(250)
-                        waited += 250
+            var lastError: Throwable? = null
+            repeat(MAX_ATTEMPTS) { attempt ->
+                try {
+                    control.awaitIfPaused()
+                    downloadAttempt(spec, temp, control, onProgress)
+                    require(temp.length() == spec.expectedSizeBytes) {
+                        "モデルサイズが不完全です: ${temp.length()} / ${spec.expectedSizeBytes} bytes"
+                    }
+                    val actual = sha256(temp)
+                    require(actual.equals(spec.sha256, ignoreCase = true)) {
+                        "WhisperモデルのSHA-256が一致しません: $actual"
+                    }
+                    installVerified(spec, temp, target)
+                    onProgress(DownloadProgress(100, spec.expectedSizeBytes, spec.expectedSizeBytes, 0))
+                    return
+                } catch (error: Throwable) {
+                    lastError = error
+                    if (error is InterruptedException || Thread.currentThread().isInterrupted) throw error
+                    if (temp.length() > spec.expectedSizeBytes || error.message?.contains("SHA-256") == true) temp.delete()
+                    if (attempt < MAX_ATTEMPTS - 1) {
+                        var waited = 0L
+                        val waitMs = longArrayOf(1_000L, 3_000L, 7_000L)[attempt]
+                        while (waited < waitMs) {
+                            control.awaitIfPaused()
+                            Thread.sleep(250)
+                            waited += 250
+                        }
                     }
                 }
             }
+            throw IOException("Whisperモデルのダウンロードに失敗しました: ${lastError?.message ?: "通信エラー"}", lastError)
+        } finally {
+            ProcessingGuardService.stop(context)
         }
-        throw IOException("Whisperモデルのダウンロードに失敗しました: ${lastError?.message ?: "通信エラー"}", lastError)
     }
 
     private fun downloadAttempt(
