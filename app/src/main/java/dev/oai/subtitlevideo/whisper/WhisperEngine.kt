@@ -14,9 +14,10 @@ class WhisperEngine(modelFile: File) : Closeable {
         chunkStartMs: Long,
         language: String = "zh",
         wordTiming: Boolean = true,
+        maxThreads: Int = 8,
     ): List<SubtitleEntry> {
         check(handle != 0L) { "Whisperは既に終了しています" }
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
+        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, maxThreads.coerceAtLeast(2))
         if (wordTiming) {
             val raw = WhisperNative.nativeTranscribeWords(handle, samples, language, threads)
             val tokens = parseTokens(raw)
