@@ -46,8 +46,8 @@ class WhisperProcessingService : Service() {
         private const val PREFS = "current_project"
         private const val CHANNEL_ID = "shared_whisper_processing"
         private const val NOTIFICATION_ID = 2410
-        private const val WHISPER_CHUNK_SECONDS = 10
-        private val PLAYBACK_MODEL = WhisperModelSpec.BASE_Q5
+        private const val WHISPER_CHUNK_SECONDS = 60
+        private val PLAYBACK_MODEL = WhisperModelSpec.TINY_Q5
     }
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -112,15 +112,15 @@ class WhisperProcessingService : Service() {
                 val modelManager = WhisperModelManager(this)
 
                 if (!modelManager.isReady(PLAYBACK_MODEL)) {
-                    updateProgress(1, "初回のみ高速視聴モデルを準備します（約60MB）")
+                    updateProgress(1, "初回のみ最速視聴モデルを準備します（約32MB）")
                     modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
-                        updateProgress((state.percent * 20) / 100, "高速視聴モデルを準備中: ${state.percent}%")
+                        updateProgress((state.percent * 15) / 100, "最速視聴モデルを準備中: ${state.percent}%")
                     }
                 }
 
                 val source = transcribe(videoUri, settings, modelManager)
                 saveSource(source)
-                updateProgress(80, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
+                updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
                 val translated = translate(source, settings)
                 saveTranslated(translated)
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
@@ -150,12 +150,12 @@ class WhisperProcessingService : Service() {
                 uri = uri,
                 chunkSeconds = WHISPER_CHUNK_SECONDS,
                 onProgress = { percent ->
-                    updateProgress(20 + (percent * 20) / 100, "音声を読み取り中: $percent%")
+                    updateProgress(15 + (percent * 10) / 100, "音声を読み取り中: $percent%")
                 },
             ) { samples, chunkStartMs ->
                 val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
                 updateProgress(
-                    (45 + (chunkNumber - 1) * 3).coerceAtMost(76),
+                    (28 + (chunkNumber - 1) * 8).coerceAtMost(80),
                     "Whisperで字幕を作成中: ${formatPosition(chunkStartMs)}付近 / 区間 $chunkNumber",
                 )
                 all += whisper.transcribe(
@@ -163,7 +163,7 @@ class WhisperProcessingService : Service() {
                     chunkStartMs = chunkStartMs,
                     language = settings.recognitionLanguageCode,
                     wordTiming = false,
-                    maxThreads = 2,
+                    maxThreads = 4,
                 )
             }
         }
@@ -178,7 +178,7 @@ class WhisperProcessingService : Service() {
     private fun translate(source: List<SubtitleEntry>, settings: AppSettings): List<SubtitleEntry> = try {
         LocalTranslator(settings.recognitionLanguageCode, settings.targetLanguageCode).use { translator ->
             translator.translate(source) { percent ->
-                updateProgress(80 + (percent * 19) / 100, "${settings.targetLanguageLabel}字幕を準備中: $percent%")
+                updateProgress(82 + (percent * 17) / 100, "${settings.targetLanguageLabel}字幕を準備中: $percent%")
             }
         }
     } catch (error: IllegalArgumentException) {
