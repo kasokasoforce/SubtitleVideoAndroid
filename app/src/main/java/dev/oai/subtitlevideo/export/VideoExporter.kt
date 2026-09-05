@@ -20,6 +20,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
+import dev.oai.subtitlevideo.settings.AppSettings
 import dev.oai.subtitlevideo.srt.SubtitleChunker
 import dev.oai.subtitlevideo.srt.SubtitleEntry
 import java.io.File
@@ -34,14 +35,20 @@ class VideoExporter(private val context: Context) {
         input: Uri,
         subtitles: List<SubtitleEntry>,
         baseName: String,
+        settings: AppSettings,
         onProgress: (Int) -> Unit,
         onCompleted: (Uri) -> Unit,
         onError: (Throwable) -> Unit,
     ) {
         check(transformer == null) { "動画出力は既に実行中です" }
-        val timeline = SubtitleChunker.toDisplayTimeline(subtitles)
+        val timeline = SubtitleChunker.toDisplayTimeline(
+            subtitles = subtitles,
+            maxEventChars = 42,
+            maxLineChars = settings.maxLineChars,
+            maxEventSeconds = settings.maxEventSeconds,
+        )
         require(timeline.isNotEmpty()) { "表示可能な字幕がありません" }
-        val overlay = SubtitleCanvasOverlay(timeline)
+        val overlay = SubtitleCanvasOverlay(timeline, settings)
         val edited = EditedMediaItem.Builder(MediaItem.fromUri(input))
             .setEffects(Effects(emptyList(), listOf(OverlayEffect(listOf(overlay)))))
             .build()
