@@ -8,7 +8,10 @@ data class AppSettings(
     val recognitionLanguageLabel: String = "中国語",
     val targetLanguageCode: String = "ja",
     val targetLanguageLabel: String = "日本語",
+    val translationMode: String = "chatgpt",
     val whisperModel: WhisperModelSpec = WhisperModelSpec.SMALL,
+    val vadEnabled: Boolean = false,
+    val wordTimingEnabled: Boolean = true,
     val subtitleTextScale: Float = 1.0f,
     val subtitleBottomMarginPercent: Int = 6,
     val maxLineChars: Int = 24,
@@ -26,7 +29,10 @@ data class AppSettings(
                 recognitionLanguageLabel = p.getString("recognitionLanguageLabel", "中国語") ?: "中国語",
                 targetLanguageCode = p.getString("targetLanguageCode", "ja") ?: "ja",
                 targetLanguageLabel = p.getString("targetLanguageLabel", "日本語") ?: "日本語",
+                translationMode = p.getString("translationMode", "chatgpt") ?: "chatgpt",
                 whisperModel = WhisperModelSpec.fromId(p.getString("whisperModel", null)),
+                vadEnabled = p.getBoolean("vadEnabled", false),
+                wordTimingEnabled = p.getBoolean("wordTimingEnabled", true),
                 subtitleTextScale = p.getFloat("subtitleTextScale", 1.0f).coerceIn(0.7f, 1.6f),
                 subtitleBottomMarginPercent = p.getInt("subtitleBottomMarginPercent", 6).coerceIn(2, 20),
                 maxLineChars = p.getInt("maxLineChars", 24).coerceIn(12, 40),
@@ -43,7 +49,10 @@ data class AppSettings(
             .putString("recognitionLanguageLabel", recognitionLanguageLabel)
             .putString("targetLanguageCode", targetLanguageCode)
             .putString("targetLanguageLabel", targetLanguageLabel)
+            .putString("translationMode", translationMode)
             .putString("whisperModel", whisperModel.id)
+            .putBoolean("vadEnabled", vadEnabled)
+            .putBoolean("wordTimingEnabled", wordTimingEnabled)
             .putFloat("subtitleTextScale", subtitleTextScale)
             .putInt("subtitleBottomMarginPercent", subtitleBottomMarginPercent)
             .putInt("maxLineChars", maxLineChars)
