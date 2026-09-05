@@ -1,12 +1,19 @@
 package dev.oai.subtitlevideo
 
 import android.app.Activity
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
+import android.os.Message
+import android.os.Messenger
+import android.os.RemoteException
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -15,43 +22,93 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import dev.oai.subtitlevideo.audio.AudioChunkDecoder
-import dev.oai.subtitlevideo.audio.SimpleVad
-import dev.oai.subtitlevideo.model.WhisperModelManager
-import dev.oai.subtitlevideo.model.WhisperModelSpec
+import dev.oai.subtitlevideo.service.WhisperProcessingService
 import dev.oai.subtitlevideo.settings.AppSettings
 import dev.oai.subtitlevideo.srt.SrtCodec
 import dev.oai.subtitlevideo.srt.SubtitleEntry
-import dev.oai.subtitlevideo.translation.LocalTranslator
-import dev.oai.subtitlevideo.whisper.WhisperEngine
 import java.io.File
-import java.util.concurrent.Executors
 
 @UnstableApi
 class SharedPlaybackActivity : Activity() {
     companion object {
         const val EXTRA_VIDEO_URI = "shared_video_uri"
         const val EXTRA_BASE_NAME = "shared_base_name"
-        private const val PREFS = "current_project"
-        private const val WHISPER_CHUNK_SECONDS = 20
-        private val PLAYBACK_MODEL = WhisperModelSpec.BASE_Q5
     }
 
-    private val worker = Executors.newSingleThreadExecutor()
     private val subtitleHandler = Handler(Looper.getMainLooper())
     private lateinit var settings: AppSettings
-    private lateinit var modelManager: WhisperModelManager
     private lateinit var statusText: TextView
     private lateinit var progress: ProgressBar
     private lateinit var fallbackButton: Button
+    private lateinit var videoUri: Uri
+    private lateinit var baseName: String
+
     private var player: ExoPlayer? = null
     private var subtitleView: TextView? = null
     private var subtitleEntries: List<SubtitleEntry> = emptyList()
     private var lastSubtitleIndex = -2
+    private var remoteWorker: Messenger? = null
+    private var bound = false
+    private var processingFinished = false
+    private var destroying = false
+
+    private val incomingMessenger = Messenger(Handler(Looper.getMainLooper()) { message ->
+        when (message.what) {
+            WhisperProcessingService.MSG_PROGRESS -> {
+                setProgress(
+                    message.data.getInt(WhisperProcessingService.KEY_PROGRESS, progress.progress),
+                    message.data.getString(WhisperProcessingService.KEY_MESSAGE) ?: "字幕を処理中",
+                )
+                true
+            }
+            WhisperProcessingService.MSG_DONE -> {
+                processingFinished = true
+                loadResultAndPlay()
+                true
+            }
+            WhisperProcessingService.MSG_ERROR -> {
+                processingFinished = true
+                fail(message.data.getString(WhisperProcessingService.KEY_MESSAGE) ?: "字幕処理に失敗しました。")
+                true
+            }
+            else -> false
+        }
+    })
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            if (service == null) {
+                fail("字幕処理サービスへ接続できませんでした。")
+                return
+            }
+            remoteWorker = Messenger(service)
+            sendStartMessage()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            remoteWorker = null
+            bound = false
+            if (!processingFinished && !destroying && player == null) {
+                fail(
+                    "Whisper処理が異常終了しました。\n" +
+                        "画面は維持しています。ネイティブ処理側のクラッシュとして検出しました。"
+                )
+            }
+        }
+
+        override fun onBindingDied(name: ComponentName?) {
+            onServiceDisconnected(name)
+        }
+
+        override fun onNullBinding(name: ComponentName?) {
+            fail("字幕処理サービスを開始できませんでした。")
+        }
+    }
 
     private val subtitleTicker = object : Runnable {
         override fun run() {
@@ -65,12 +122,16 @@ class SharedPlaybackActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         settings = AppSettings.load(this)
-        modelManager = WhisperModelManager(this)
         buildProcessingUi()
-        val videoUri = intent.getStringExtra(EXTRA_VIDEO_URI)?.let(Uri::parse)
-        val baseName = intent.getStringExtra(EXTRA_BASE_NAME).orEmpty().ifBlank { "shared_video" }
-        if (videoUri == null) return fail("共有動画を開けませんでした。")
-        processForPlayback(videoUri, baseName)
+
+        val parsedUri = intent.getStringExtra(EXTRA_VIDEO_URI)?.let(Uri::parse)
+        if (parsedUri == null) {
+            fail("共有動画を開けませんでした。")
+            return
+        }
+        videoUri = parsedUri
+        baseName = intent.getStringExtra(EXTRA_BASE_NAME).orEmpty().ifBlank { "shared_video" }
+        startRemoteProcessing()
     }
 
     override fun onStop() {
@@ -88,11 +149,53 @@ class SharedPlaybackActivity : Activity() {
     }
 
     override fun onDestroy() {
+        destroying = true
         subtitleHandler.removeCallbacksAndMessages(null)
         player?.release()
         player = null
-        worker.shutdownNow()
+        if (bound) {
+            runCatching { unbindService(serviceConnection) }
+            bound = false
+        }
+        remoteWorker = null
         super.onDestroy()
+    }
+
+    private fun startRemoteProcessing() {
+        setProgress(0, "字幕処理サービスを開始しています。")
+        val serviceIntent = Intent(this, WhisperProcessingService::class.java)
+        ContextCompat.startForegroundService(this, serviceIntent)
+        bound = bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+        if (!bound) fail("字幕処理サービスへ接続できませんでした。")
+    }
+
+    private fun sendStartMessage() {
+        val target = remoteWorker ?: return
+        val data = Bundle().apply {
+            putString(WhisperProcessingService.KEY_VIDEO_URI, videoUri.toString())
+            putString(WhisperProcessingService.KEY_BASE_NAME, baseName)
+        }
+        try {
+            target.send(Message.obtain(null, WhisperProcessingService.MSG_START).apply {
+                this.data = data
+                replyTo = incomingMessenger
+            })
+        } catch (_: RemoteException) {
+            fail("字幕処理サービスとの通信が切断されました。")
+        }
+    }
+
+    private fun loadResultAndPlay() {
+        runCatching {
+            val result = File(filesDir, "current/translated.srt")
+            require(result.isFile && result.length() > 0L) { "翻訳済み字幕ファイルがありません" }
+            SrtCodec.parse(result.readText(Charsets.UTF_8))
+        }.onSuccess { entries ->
+            setProgress(100, "字幕の準備が完了しました。")
+            showPlayer(videoUri, entries)
+        }.onFailure { error ->
+            fail("字幕結果を読み込めませんでした: ${error.message ?: error.javaClass.simpleName}")
+        }
     }
 
     private fun buildProcessingUi() {
@@ -109,11 +212,14 @@ class SharedPlaybackActivity : Activity() {
             textSize = 14f
             setPadding(0, dp(14), 0, dp(14))
         }
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 0 }
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+        }
         root.addView(statusText)
         root.addView(progress)
         root.addView(TextView(this).apply {
-            text = "動画フォルダには保存しません。視聴用の軽量Whisperモデルを使用します。"
+            text = "Whisperは別プロセスで実行します。処理側が落ちてもこの画面は維持します。"
             textSize = 12f
             setPadding(0, dp(10), 0, dp(10))
         })
@@ -127,96 +233,6 @@ class SharedPlaybackActivity : Activity() {
         setContentView(root)
     }
 
-    private fun processForPlayback(videoUri: Uri, baseName: String) {
-        worker.execute {
-            runCatching {
-                if (!modelManager.isReady(PLAYBACK_MODEL)) {
-                    runOnUiThread { setProgress(1, "初回のみ高速視聴モデルを準備します（約60MB）") }
-                    modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
-                        runOnUiThread { setProgress((state.percent * 20) / 100, "高速視聴モデルを準備中: ${state.percent}%") }
-                    }
-                }
-                val source = transcribe(videoUri)
-                saveSource(source)
-                val translated = translateForPlayback(source)
-                saveTranslated(translated)
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString("videoUri", videoUri.toString())
-                    .putString("baseName", baseName)
-                    .remove("outputUri")
-                    .apply()
-                translated
-            }.onSuccess { translated ->
-                runOnUiThread {
-                    setProgress(100, "字幕の準備が完了しました。")
-                    showPlayer(videoUri, translated)
-                }
-            }.onFailure { error ->
-                runOnUiThread { fail("字幕付き再生の準備に失敗しました: ${error.message ?: error.javaClass.simpleName}") }
-            }
-        }
-    }
-
-    private fun transcribe(uri: Uri): List<SubtitleEntry> {
-        val all = mutableListOf<SubtitleEntry>()
-        WhisperEngine(modelManager.modelFile(PLAYBACK_MODEL)).use { whisper ->
-            AudioChunkDecoder(this).decode(
-                uri = uri,
-                chunkSeconds = WHISPER_CHUNK_SECONDS,
-                onProgress = { percent -> runOnUiThread {
-                    setProgress(20 + (percent * 20) / 100, "音声を読み取り中: $percent%")
-                } },
-            ) { samples, chunkStartMs ->
-                val windows = SimpleVad.split(samples)
-                windows.forEachIndexed { index, window ->
-                    val absoluteStartMs = chunkStartMs + window.offsetMs
-                    val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
-                    runOnUiThread {
-                        setProgress(
-                            (45 + (chunkNumber - 1) * 5).coerceAtMost(75),
-                            "Whisperで字幕を作成中: ${formatPosition(absoluteStartMs)}付近 / 区間 $chunkNumber / 音声 ${index + 1}/${windows.size}",
-                        )
-                    }
-                    all += whisper.transcribe(
-                        samples = window.samples,
-                        chunkStartMs = absoluteStartMs,
-                        language = settings.recognitionLanguageCode,
-                        wordTiming = false,
-                    )
-                }
-            }
-        }
-        val normalized = all
-            .filter { it.text.isNotBlank() && it.endMs > it.startMs }
-            .sortedBy { it.startMs }
-            .mapIndexed { index, item -> item.copy(index = index + 1) }
-        require(normalized.isNotEmpty()) { "字幕を認識できませんでした" }
-        runOnUiThread { setProgress(80, "字幕を${settings.targetLanguageLabel}へ翻訳します。") }
-        return normalized
-    }
-
-    private fun translateForPlayback(source: List<SubtitleEntry>): List<SubtitleEntry> = try {
-        LocalTranslator(settings.recognitionLanguageCode, settings.targetLanguageCode).use { translator ->
-            translator.translate(source) { percent -> runOnUiThread {
-                setProgress(80 + (percent * 19) / 100, "${settings.targetLanguageLabel}字幕を準備中: $percent%")
-            } }
-        }
-    } catch (error: IllegalArgumentException) {
-        if (error.message?.contains("元言語と翻訳先が同じ") == true) source else throw error
-    }
-
-    private fun saveSource(entries: List<SubtitleEntry>) {
-        projectDir().mkdirs()
-        File(projectDir(), "source.srt").writeText(SrtCodec.format(entries), Charsets.UTF_8)
-    }
-
-    private fun saveTranslated(entries: List<SubtitleEntry>) {
-        projectDir().mkdirs()
-        File(projectDir(), "translated.srt").writeText(SrtCodec.format(entries), Charsets.UTF_8)
-    }
-
-    private fun projectDir() = File(filesDir, "current")
-
     private fun showPlayer(videoUri: Uri, entries: List<SubtitleEntry>) {
         subtitleEntries = entries
         lastSubtitleIndex = -2
@@ -227,27 +243,54 @@ class SharedPlaybackActivity : Activity() {
             useController = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
         }
-        root.addView(playerView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        root.addView(
+            playerView,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT),
+        )
         subtitleView = TextView(this).apply {
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             textSize = 20f * settings.subtitleTextScale
             maxLines = settings.maxLines
             setPadding(dp(14), dp(6), dp(14), dp(6))
-            if (settings.shadowPercent > 0) setShadowLayer(1f + settings.shadowPercent / 25f, 0f, 2f, Color.BLACK)
+            if (settings.shadowPercent > 0) {
+                setShadowLayer(1f + settings.shadowPercent / 25f, 0f, 2f, Color.BLACK)
+            }
         }
-        val bottomMargin = (resources.displayMetrics.heightPixels * (settings.subtitleBottomMarginPercent / 100f)).toInt().coerceAtLeast(dp(24))
-        root.addView(subtitleView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            marginStart = dp(12); marginEnd = dp(12); this.bottomMargin = bottomMargin
-        })
+        val bottomMargin = (
+            resources.displayMetrics.heightPixels * (settings.subtitleBottomMarginPercent / 100f)
+            ).toInt().coerceAtLeast(dp(24))
+        root.addView(
+            subtitleView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+            ).apply {
+                marginStart = dp(12)
+                marginEnd = dp(12)
+                this.bottomMargin = bottomMargin
+            },
+        )
         val editButton = Button(this).apply {
             text = "保存・編集"
             isAllCaps = false
-            setOnClickListener { player?.pause(); startActivity(Intent(this@SharedPlaybackActivity, MainActivity::class.java)) }
+            setOnClickListener {
+                player?.pause()
+                startActivity(Intent(this@SharedPlaybackActivity, MainActivity::class.java))
+            }
         }
-        root.addView(editButton, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
-            topMargin = dp(12); marginEnd = dp(12)
-        })
+        root.addView(
+            editButton,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END,
+            ).apply {
+                topMargin = dp(12)
+                marginEnd = dp(12)
+            },
+        )
         setContentView(root)
         player = ExoPlayer.Builder(this).build().also { exoPlayer ->
             playerView.player = exoPlayer
@@ -279,11 +322,6 @@ class SharedPlaybackActivity : Activity() {
             }
         }
         return -1
-    }
-
-    private fun formatPosition(positionMs: Long): String {
-        val totalSeconds = (positionMs / 1000L).coerceAtLeast(0L)
-        return "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L)
     }
 
     private fun setProgress(value: Int, message: String) {
