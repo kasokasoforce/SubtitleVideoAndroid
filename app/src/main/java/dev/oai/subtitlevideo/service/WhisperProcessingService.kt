@@ -15,6 +15,7 @@ import android.os.Messenger
 import android.os.PowerManager
 import android.os.RemoteException
 import androidx.core.app.NotificationCompat
+import dev.oai.subtitlevideo.asr.SystemSpeechRecognizerTranscriber
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
 import dev.oai.subtitlevideo.model.WhisperModelManager
 import dev.oai.subtitlevideo.model.WhisperModelSpec
@@ -27,10 +28,6 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Runs the crash-prone native Whisper pipeline in a dedicated process.
- * If native code aborts, the UI process survives and can report the worker death.
- */
 class WhisperProcessingService : Service() {
     companion object {
         const val MSG_START = 1
@@ -74,16 +71,13 @@ class WhisperProcessingService : Service() {
                     }
                 }
                 true
-            } else {
-                false
-            }
+            } else false
         })
     }
 
     override fun onCreate() {
         super.onCreate()
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "共有動画の字幕処理", NotificationManager.IMPORTANCE_LOW)
         )
         val power = getSystemService(PowerManager::class.java)
@@ -95,7 +89,6 @@ class WhisperProcessingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
-
     override fun onBind(intent: Intent?): IBinder = incomingMessenger.binder
 
     override fun onDestroy() {
@@ -109,16 +102,7 @@ class WhisperProcessingService : Service() {
         worker.execute {
             runCatching {
                 val settings = AppSettings.load(this)
-                val modelManager = WhisperModelManager(this)
-
-                if (!modelManager.isReady(PLAYBACK_MODEL)) {
-                    updateProgress(1, "初回のみ最速視聴モデルを準備します（約32MB）")
-                    modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
-                        updateProgress((state.percent * 15) / 100, "最速視聴モデルを準備中: ${state.percent}%")
-                    }
-                }
-
-                val source = transcribe(videoUri, settings, modelManager)
+                val source = transcribeFastOrWhisper(videoUri, settings)
                 saveSource(source)
                 updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
                 val translated = translate(source, settings)
@@ -139,7 +123,39 @@ class WhisperProcessingService : Service() {
         }
     }
 
-    private fun transcribe(
+    private fun transcribeFastOrWhisper(uri: Uri, settings: AppSettings): List<SubtitleEntry> {
+        if (SystemSpeechRecognizerTranscriber.isUsable(this)) {
+            updateProgress(3, "高速経路: Android音声認識を試します")
+            val fastResult = runCatching {
+                SystemSpeechRecognizerTranscriber(this).transcribe(
+                    uri = uri,
+                    languageCode = settings.recognitionLanguageCode,
+                ) { percent, message -> updateProgress(percent.coerceAtMost(78), message) }
+            }
+            if (fastResult.isSuccess) {
+                val entries = fastResult.getOrThrow()
+                updateProgress(80, "高速音声認識が完了しました: ${entries.size}字幕")
+                return entries
+            }
+            updateProgress(
+                4,
+                "高速音声認識を使えなかったためWhisperへ切替: ${fastResult.exceptionOrNull()?.message ?: "非対応"}",
+            )
+        } else {
+            updateProgress(2, "この端末では高速音声認識を使えないためWhisperへ切り替えます")
+        }
+
+        val modelManager = WhisperModelManager(this)
+        if (!modelManager.isReady(PLAYBACK_MODEL)) {
+            updateProgress(5, "フォールバック用Whisperモデルを準備します（約32MB）")
+            modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
+                updateProgress((state.percent * 15) / 100, "Whisperモデルを準備中: ${state.percent}%")
+            }
+        }
+        return transcribeWhisper(uri, settings, modelManager)
+    }
+
+    private fun transcribeWhisper(
         uri: Uri,
         settings: AppSettings,
         modelManager: WhisperModelManager,
@@ -150,7 +166,7 @@ class WhisperProcessingService : Service() {
                 uri = uri,
                 chunkSeconds = WHISPER_CHUNK_SECONDS,
                 onProgress = { percent ->
-                    updateProgress(15 + (percent * 10) / 100, "音声を読み取り中: $percent%")
+                    updateProgress(15 + (percent * 10) / 100, "Whisper用音声を読み取り中: $percent%")
                 },
             ) { samples, chunkStartMs ->
                 val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
@@ -167,7 +183,6 @@ class WhisperProcessingService : Service() {
                 )
             }
         }
-
         return all
             .filter { it.text.isNotBlank() && it.endMs > it.startMs }
             .sortedBy { it.startMs }
@@ -186,11 +201,9 @@ class WhisperProcessingService : Service() {
     }
 
     private fun projectDir() = File(filesDir, "current").apply { mkdirs() }
-
     private fun saveSource(entries: List<SubtitleEntry>) {
         File(projectDir(), "source.srt").writeText(SrtCodec.format(entries), Charsets.UTF_8)
     }
-
     private fun saveTranslated(entries: List<SubtitleEntry>) {
         File(projectDir(), "translated.srt").writeText(SrtCodec.format(entries), Charsets.UTF_8)
     }
@@ -199,16 +212,14 @@ class WhisperProcessingService : Service() {
         lastProgress = maxOf(lastProgress, value.coerceIn(0, 100))
         lastMessage = message
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(message))
-        val data = Bundle().apply {
+        send(MSG_PROGRESS, Bundle().apply {
             putInt(KEY_PROGRESS, lastProgress)
             putString(KEY_MESSAGE, message)
-        }
-        send(MSG_PROGRESS, data)
+        })
     }
 
-    private fun sendError(message: String) {
+    private fun sendError(message: String) =
         send(MSG_ERROR, Bundle().apply { putString(KEY_MESSAGE, message) })
-    }
 
     private fun sendSimple(what: Int) = send(what, Bundle.EMPTY)
 
