@@ -6,6 +6,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import dev.oai.subtitlevideo.service.ProcessingGuardService
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -22,6 +23,7 @@ class AudioChunkDecoder(private val context: Context) {
         onProgress: (Int) -> Unit = {},
         onChunk: (samples: FloatArray, chunkStartMs: Long) -> Unit,
     ) {
+        ProcessingGuardService.start(context, "音声解析・Whisper文字起こしを実行中")
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -116,6 +118,7 @@ class AudioChunkDecoder(private val context: Context) {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
             extractor.release()
+            ProcessingGuardService.stop(context)
         }
     }
 
