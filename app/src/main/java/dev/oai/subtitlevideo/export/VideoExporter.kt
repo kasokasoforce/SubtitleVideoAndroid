@@ -20,6 +20,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
+import dev.oai.subtitlevideo.service.ProcessingGuardService
 import dev.oai.subtitlevideo.settings.AppSettings
 import dev.oai.subtitlevideo.srt.SubtitleChunker
 import dev.oai.subtitlevideo.srt.SubtitleEntry
@@ -62,8 +63,14 @@ class VideoExporter(private val context: Context) {
                 transformer = null
                 Thread {
                     runCatching { publishVideo(temp, "${baseName}_captioned.mp4") }
-                        .onSuccess { uri -> mainHandler.post { onCompleted(uri) } }
-                        .onFailure { error -> mainHandler.post { onError(error) } }
+                        .onSuccess { uri ->
+                            ProcessingGuardService.stop(context)
+                            mainHandler.post { onCompleted(uri) }
+                        }
+                        .onFailure { error ->
+                            ProcessingGuardService.stop(context)
+                            mainHandler.post { onError(error) }
+                        }
                 }.start()
             }
 
@@ -74,6 +81,7 @@ class VideoExporter(private val context: Context) {
             ) {
                 stopProgressPolling()
                 transformer = null
+                ProcessingGuardService.stop(context)
                 onError(exportException)
             }
         }
@@ -82,14 +90,22 @@ class VideoExporter(private val context: Context) {
             .setVideoMimeType(MimeTypes.VIDEO_H264)
             .addListener(listener)
             .build()
-        transformer!!.start(edited, temp.absolutePath)
-        startProgressPolling(onProgress)
+        ProcessingGuardService.start(context, "字幕動画を書き出しています")
+        try {
+            transformer!!.start(edited, temp.absolutePath)
+            startProgressPolling(onProgress)
+        } catch (t: Throwable) {
+            transformer = null
+            ProcessingGuardService.stop(context)
+            throw t
+        }
     }
 
     fun cancel() {
         transformer?.cancel()
         transformer = null
         stopProgressPolling()
+        ProcessingGuardService.stop(context)
     }
 
     private fun startProgressPolling(onProgress: (Int) -> Unit) {
