@@ -7,6 +7,7 @@ import android.graphics.PorterDuff
 import android.graphics.Typeface
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.CanvasOverlay
+import dev.oai.subtitlevideo.settings.AppSettings
 import dev.oai.subtitlevideo.srt.DisplaySubtitle
 import dev.oai.subtitlevideo.srt.SubtitleChunker
 import kotlin.math.max
@@ -14,6 +15,7 @@ import kotlin.math.max
 @UnstableApi
 class SubtitleCanvasOverlay(
     private val timeline: List<DisplaySubtitle>,
+    private val settings: AppSettings,
 ) : CanvasOverlay(true) {
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -25,14 +27,24 @@ class SubtitleCanvasOverlay(
     override fun onDraw(canvas: Canvas, presentationTimeUs: Long) {
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
         val item = findActive(presentationTimeUs / 1000L) ?: return
-        val textSize = max(28f, canvas.height * 0.040f)
+        val textSize = max(24f, canvas.height * 0.040f * settings.subtitleTextScale)
         paint.textSize = textSize
-        paint.setShadowLayer(max(1.5f, textSize * 0.065f), 0f, textSize * 0.045f, 0x99000000.toInt())
+        val shadowStrength = settings.shadowPercent / 100f
+        if (shadowStrength > 0f) {
+            paint.setShadowLayer(
+                max(1.0f, textSize * (0.02f + 0.07f * shadowStrength)),
+                0f,
+                textSize * 0.045f,
+                ((80 + 175 * shadowStrength).toInt().coerceIn(0, 255) shl 24),
+            )
+        } else {
+            paint.clearShadowLayer()
+        }
 
-        val lines = SubtitleChunker.wrapLines(item.text, 24).take(2)
+        val lines = SubtitleChunker.wrapLines(item.text, settings.maxLineChars).take(settings.maxLines)
         if (lines.isEmpty()) return
         val lineHeight = textSize * 1.18f
-        val marginBottom = max(48f, canvas.height * 0.055f)
+        val marginBottom = max(24f, canvas.height * (settings.subtitleBottomMarginPercent / 100f))
         val lastBaseline = canvas.height - marginBottom
         val firstBaseline = lastBaseline - lineHeight * (lines.size - 1)
         val centerX = canvas.width / 2f
