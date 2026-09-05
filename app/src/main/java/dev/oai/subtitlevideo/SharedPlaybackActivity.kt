@@ -45,6 +45,7 @@ class SharedPlaybackActivity : Activity() {
         const val EXTRA_VIDEO_URI = "shared_video_uri"
         const val EXTRA_BASE_NAME = "shared_base_name"
         private const val PREFS = "current_project"
+        private const val WHISPER_CHUNK_SECONDS = 20
     }
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -191,6 +192,7 @@ class SharedPlaybackActivity : Activity() {
         WhisperEngine(modelManager.modelFile(spec)).use { whisper ->
             AudioChunkDecoder(this).decode(
                 uri = uri,
+                chunkSeconds = WHISPER_CHUNK_SECONDS,
                 onProgress = { percent ->
                     runOnUiThread {
                         val mapped = 20 + (percent * 20) / 100
@@ -201,17 +203,19 @@ class SharedPlaybackActivity : Activity() {
                 val windows = if (settings.vadEnabled) SimpleVad.split(samples)
                 else listOf(SimpleVad.SpeechWindow(samples, 0L))
                 windows.forEachIndexed { index, window ->
-                    val minute = (chunkStartMs + window.offsetMs) / 60_000
+                    val absoluteStartMs = chunkStartMs + window.offsetMs
+                    val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
+                    val displayProgress = (45 + (chunkNumber - 1) * 5).coerceAtMost(75)
                     runOnUiThread {
                         setProgress(
-                            45,
-                            "Whisperで字幕を作成中: ${minute}分付近" +
-                                if (settings.vadEnabled) " / 音声区間 ${index + 1}/${windows.size}" else "",
+                            displayProgress,
+                            "Whisperで字幕を作成中: ${formatPosition(absoluteStartMs)}付近 / 区間 $chunkNumber" +
+                                if (settings.vadEnabled) " / 音声 ${index + 1}/${windows.size}" else "",
                         )
                     }
                     all += whisper.transcribe(
                         samples = window.samples,
-                        chunkStartMs = chunkStartMs + window.offsetMs,
+                        chunkStartMs = absoluteStartMs,
                         language = settings.recognitionLanguageCode,
                         wordTiming = settings.wordTimingEnabled,
                     )
@@ -357,8 +361,15 @@ class SharedPlaybackActivity : Activity() {
         return -1
     }
 
+    private fun formatPosition(positionMs: Long): String {
+        val totalSeconds = (positionMs / 1000L).coerceAtLeast(0L)
+        val minutes = totalSeconds / 60L
+        val seconds = totalSeconds % 60L
+        return "%d:%02d".format(minutes, seconds)
+    }
+
     private fun setProgress(value: Int, message: String) {
-        progress.progress = value.coerceIn(0, 100)
+        progress.progress = maxOf(progress.progress, value.coerceIn(0, 100))
         statusText.text = message
     }
 
