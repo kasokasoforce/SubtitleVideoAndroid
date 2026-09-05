@@ -50,8 +50,7 @@
 
         <activity
             android:name=".SharedPlaybackActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
 
         <service
             android:name=".service.ProcessingGuardService"
