@@ -1,12 +1,15 @@
 package dev.oai.subtitlevideo
 
+import android.Manifest
 import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -38,6 +41,7 @@ class SharedPlaybackActivity : Activity() {
     companion object {
         const val EXTRA_VIDEO_URI = "shared_video_uri"
         const val EXTRA_BASE_NAME = "shared_base_name"
+        private const val REQ_RECORD_AUDIO = 2001
     }
 
     private val subtitleHandler = Handler(Looper.getMainLooper())
@@ -94,20 +98,12 @@ class SharedPlaybackActivity : Activity() {
             remoteWorker = null
             bound = false
             if (!processingFinished && !destroying && player == null) {
-                fail(
-                    "Whisper処理が異常終了しました。\n" +
-                        "画面は維持しています。ネイティブ処理側のクラッシュとして検出しました。"
-                )
+                fail("字幕処理が異常終了しました。\n画面は維持しています。")
             }
         }
 
-        override fun onBindingDied(name: ComponentName?) {
-            onServiceDisconnected(name)
-        }
-
-        override fun onNullBinding(name: ComponentName?) {
-            fail("字幕処理サービスを開始できませんでした。")
-        }
+        override fun onBindingDied(name: ComponentName?) = onServiceDisconnected(name)
+        override fun onNullBinding(name: ComponentName?) = fail("字幕処理サービスを開始できませんでした。")
     }
 
     private val subtitleTicker = object : Runnable {
@@ -131,7 +127,30 @@ class SharedPlaybackActivity : Activity() {
         }
         videoUri = parsedUri
         baseName = intent.getStringExtra(EXTRA_BASE_NAME).orEmpty().ifBlank { "shared_video" }
-        startRemoteProcessing()
+        startWithFastRecognitionPermission()
+    }
+
+    private fun startWithFastRecognitionPermission() {
+        if (Build.VERSION.SDK_INT >= 34 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            setProgress(0, "高速音声認識を使うため、音声認識権限を確認します。動画ファイルの音声を認識に渡すためのAndroid仕様です。")
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_RECORD_AUDIO)
+        } else {
+            startRemoteProcessing()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_RECORD_AUDIO) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                setProgress(0, "高速音声認識を使用します。")
+            } else {
+                setProgress(0, "権限がないためWhisperへ自動切替します。")
+            }
+            startRemoteProcessing()
+        }
     }
 
     override fun onStop() {
@@ -162,6 +181,7 @@ class SharedPlaybackActivity : Activity() {
     }
 
     private fun startRemoteProcessing() {
+        if (bound) return
         setProgress(0, "字幕処理サービスを開始しています。")
         val serviceIntent = Intent(this, WhisperProcessingService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
@@ -219,7 +239,7 @@ class SharedPlaybackActivity : Activity() {
         root.addView(statusText)
         root.addView(progress)
         root.addView(TextView(this).apply {
-            text = "Whisperは別プロセスで実行します。処理側が落ちてもこの画面は維持します。"
+            text = "対応端末ではAndroid音声認識を優先し、使えない場合だけWhisperへ切り替えます。"
             textSize = 12f
             setPadding(0, dp(10), 0, dp(10))
         })
@@ -243,30 +263,19 @@ class SharedPlaybackActivity : Activity() {
             useController = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
         }
-        root.addView(
-            playerView,
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT),
-        )
+        root.addView(playerView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         subtitleView = TextView(this).apply {
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             textSize = 20f * settings.subtitleTextScale
             maxLines = settings.maxLines
             setPadding(dp(14), dp(6), dp(14), dp(6))
-            if (settings.shadowPercent > 0) {
-                setShadowLayer(1f + settings.shadowPercent / 25f, 0f, 2f, Color.BLACK)
-            }
+            if (settings.shadowPercent > 0) setShadowLayer(1f + settings.shadowPercent / 25f, 0f, 2f, Color.BLACK)
         }
-        val bottomMargin = (
-            resources.displayMetrics.heightPixels * (settings.subtitleBottomMarginPercent / 100f)
-            ).toInt().coerceAtLeast(dp(24))
+        val bottomMargin = (resources.displayMetrics.heightPixels * (settings.subtitleBottomMarginPercent / 100f)).toInt().coerceAtLeast(dp(24))
         root.addView(
             subtitleView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-            ).apply {
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
                 marginStart = dp(12)
                 marginEnd = dp(12)
                 this.bottomMargin = bottomMargin
@@ -282,11 +291,7 @@ class SharedPlaybackActivity : Activity() {
         }
         root.addView(
             editButton,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.END,
-            ).apply {
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
                 topMargin = dp(12)
                 marginEnd = dp(12)
             },
