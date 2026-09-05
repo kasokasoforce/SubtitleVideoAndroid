@@ -19,6 +19,11 @@ jobs:
         with:
           gradle-version: '9.6.0'
       - uses: android-actions/setup-android@v3
+      - name: Keep one debug signing identity
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: subtitlevideo-debug-keystore-v1
       - name: Install Android SDK components
         run: |
           yes | sdkmanager --licenses >/dev/null || true
