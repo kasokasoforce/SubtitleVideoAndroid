@@ -17,14 +17,16 @@ import java.io.FileOutputStream
 import java.util.concurrent.Executors
 
 /**
- * Receives a video from Android's share sheet (Telegram/Goreglam etc.) and makes a stable,
- * app-private working copy. This avoids depending on the sender's temporary content:// grant
- * during a long Whisper/export job. No manual "save video" step is required.
+ * Receives a video from Android's share sheet (Telegram/Goregram etc.) and makes a stable,
+ * app-private temporary working copy. No manual save step is required and the shared video is
+ * not written to Movies/Downloads/Gallery.
  */
 class VideoShareActivity : Activity() {
     companion object {
         private const val PREFS = "current_project"
     }
+
+    private data class ImportedVideo(val uri: Uri, val baseName: String)
 
     private val worker = Executors.newSingleThreadExecutor()
     private lateinit var status: TextView
@@ -56,11 +58,11 @@ class VideoShareActivity : Activity() {
             setPadding(dp(24), dp(28), dp(24), dp(28))
         }
         root.addView(TextView(this).apply {
-            text = "共有動画を取り込み中"
+            text = "共有動画を準備中"
             textSize = 22f
         })
         status = TextView(this).apply {
-            text = "Goreglam / Telegramから受け取った動画を準備しています…"
+            text = "Goregram / Telegramから受け取った動画を一時領域へ準備しています…"
             textSize = 14f
             setPadding(0, dp(14), 0, dp(14))
         }
@@ -70,11 +72,16 @@ class VideoShareActivity : Activity() {
         }
         root.addView(status)
         root.addView(progress)
+        root.addView(TextView(this).apply {
+            text = "動画フォルダには保存しません。"
+            textSize = 12f
+            setPadding(0, dp(10), 0, 0)
+        })
         setContentView(root)
     }
 
     private fun importSharedVideo(source: Uri) {
-        ProcessingGuardService.start(this, "共有動画を取り込み中")
+        ProcessingGuardService.start(this, "共有動画を準備中")
         worker.execute {
             runCatching {
                 val displayName = queryDisplayName(source)
@@ -83,13 +90,13 @@ class VideoShareActivity : Activity() {
                     .lowercase()
                     .takeIf { it.matches(Regex("[a-z0-9]{1,8}")) }
                     ?: "mp4"
-                val projectDir = File(filesDir, "current").apply { mkdirs() }
-                val target = File(projectDir, "shared_input.$extension")
-                val temp = File(projectDir, "shared_input.$extension.part")
 
-                projectDir.listFiles()
-                    ?.filter { it.name.startsWith("shared_input.") && it != temp }
-                    ?.forEach { it.delete() }
+                // Shared videos are intentionally kept in cache, not user-visible storage.
+                val shareDir = File(cacheDir, "shared_video").apply { mkdirs() }
+                val target = File(shareDir, "input.$extension")
+                val temp = File(shareDir, "input.$extension.part")
+                shareDir.listFiles()?.forEach { if (it != target && it != temp) it.delete() }
+                if (target.exists()) target.delete()
                 if (temp.exists()) temp.delete()
 
                 contentResolver.openInputStream(source)?.use { input ->
@@ -106,10 +113,10 @@ class VideoShareActivity : Activity() {
                                 runOnUiThread {
                                     progress.isIndeterminate = false
                                     progress.progress = percent
-                                    status.text = "取り込み中: $percent%  ${formatMb(copied)} / ${formatMb(expectedSize)} MB"
+                                    status.text = "準備中: $percent%  ${formatMb(copied)} / ${formatMb(expectedSize)} MB"
                                 }
                             } else {
-                                runOnUiThread { status.text = "取り込み中: ${formatMb(copied)} MB" }
+                                runOnUiThread { status.text = "準備中: ${formatMb(copied)} MB" }
                             }
                         }
                         output.fd.sync()
@@ -117,12 +124,12 @@ class VideoShareActivity : Activity() {
                 } ?: error("共有動画を開けませんでした")
 
                 require(temp.isFile && temp.length() > 0L) { "共有動画の内容が空です" }
-                if (target.exists()) target.delete()
-                require(temp.renameTo(target)) { "共有動画を作業領域へ保存できませんでした" }
+                require(temp.renameTo(target)) { "共有動画を一時領域へ保存できませんでした" }
 
                 val stableUri = FileProvider.getUriForFile(this, "$packageName.files", target)
                 val baseName = displayName.substringBeforeLast('.').ifBlank { "shared_video" }
 
+                val projectDir = File(filesDir, "current").apply { mkdirs() }
                 File(projectDir, "source.srt").delete()
                 File(projectDir, "translated.srt").delete()
                 File(projectDir, "source.zh.srt").delete()
@@ -133,20 +140,24 @@ class VideoShareActivity : Activity() {
                     .putString("baseName", baseName)
                     .remove("outputUri")
                     .apply()
-                baseName
-            }.onSuccess { name ->
+                ImportedVideo(stableUri, baseName)
+            }.onSuccess { imported ->
                 runOnUiThread {
                     ProcessingGuardService.stop(this)
                     progress.isIndeterminate = false
                     progress.progress = 100
-                    status.text = "取り込み完了: $name\n字幕動画メーカーを開きます。"
-                    startActivity(Intent(this, MainActivity::class.java))
+                    status.text = "準備完了: ${imported.baseName}\n字幕付き再生を開始します。"
+                    startActivity(
+                        Intent(this, SharedPlaybackActivity::class.java)
+                            .putExtra(SharedPlaybackActivity.EXTRA_VIDEO_URI, imported.uri.toString())
+                            .putExtra(SharedPlaybackActivity.EXTRA_BASE_NAME, imported.baseName)
+                    )
                     finish()
                 }
             }.onFailure { error ->
                 runOnUiThread {
                     ProcessingGuardService.stop(this)
-                    fail("動画の取り込みに失敗しました: ${error.message ?: error.javaClass.simpleName}")
+                    fail("動画の準備に失敗しました: ${error.message ?: error.javaClass.simpleName}")
                 }
             }
         }
