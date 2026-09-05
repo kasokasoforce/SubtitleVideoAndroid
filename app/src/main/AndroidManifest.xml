@@ -57,6 +57,12 @@
             android:exported="false"
             android:foregroundServiceType="mediaProcessing|dataSync" />
 
+        <service
+            android:name=".service.WhisperProcessingService"
+            android:exported="false"
+            android:process=":whisper"
+            android:foregroundServiceType="mediaProcessing|dataSync" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
