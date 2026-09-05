@@ -8,6 +8,14 @@ enum class WhisperModelSpec(
     val sha256: String,
     val downloadUrl: String,
 ) {
+    BASE_Q5(
+        id = "base-q5",
+        displayName = "高速視聴: base q5（約60MB）",
+        fileName = "ggml-base-q5_1.bin",
+        expectedSizeBytes = 59_707_625L,
+        sha256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
+        downloadUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/c521a4b02f422512d734391fdf08bb08c0862f68/ggml-base-q5_1.bin?download=true",
+    ),
     SMALL(
         id = "small",
         displayName = "標準: small（約488MB）",
