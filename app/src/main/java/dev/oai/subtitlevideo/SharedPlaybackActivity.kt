@@ -22,6 +22,7 @@ import androidx.media3.ui.PlayerView
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
 import dev.oai.subtitlevideo.audio.SimpleVad
 import dev.oai.subtitlevideo.model.WhisperModelManager
+import dev.oai.subtitlevideo.model.WhisperModelSpec
 import dev.oai.subtitlevideo.settings.AppSettings
 import dev.oai.subtitlevideo.srt.SrtCodec
 import dev.oai.subtitlevideo.srt.SubtitleEntry
@@ -30,15 +31,6 @@ import dev.oai.subtitlevideo.whisper.WhisperEngine
 import java.io.File
 import java.util.concurrent.Executors
 
-/**
- * Automatic share-to-watch flow.
- *
- * A video received from Goregram/Telegram is already copied into this app's cache by
- * [VideoShareActivity]. This activity prepares Whisper if needed, transcribes, translates with
- * the on-device ML Kit translator, and plays the original video with a live subtitle overlay.
- * It does not render or save a new MP4. The existing MainActivity remains available when the
- * user explicitly wants to edit subtitles or export a burned-in copy.
- */
 @UnstableApi
 class SharedPlaybackActivity : Activity() {
     companion object {
@@ -46,17 +38,16 @@ class SharedPlaybackActivity : Activity() {
         const val EXTRA_BASE_NAME = "shared_base_name"
         private const val PREFS = "current_project"
         private const val WHISPER_CHUNK_SECONDS = 20
+        private val PLAYBACK_MODEL = WhisperModelSpec.BASE_Q5
     }
 
     private val worker = Executors.newSingleThreadExecutor()
     private val subtitleHandler = Handler(Looper.getMainLooper())
-
     private lateinit var settings: AppSettings
     private lateinit var modelManager: WhisperModelManager
     private lateinit var statusText: TextView
     private lateinit var progress: ProgressBar
     private lateinit var fallbackButton: Button
-
     private var player: ExoPlayer? = null
     private var subtitleView: TextView? = null
     private var subtitleEntries: List<SubtitleEntry> = emptyList()
@@ -76,13 +67,9 @@ class SharedPlaybackActivity : Activity() {
         settings = AppSettings.load(this)
         modelManager = WhisperModelManager(this)
         buildProcessingUi()
-
         val videoUri = intent.getStringExtra(EXTRA_VIDEO_URI)?.let(Uri::parse)
         val baseName = intent.getStringExtra(EXTRA_BASE_NAME).orEmpty().ifBlank { "shared_video" }
-        if (videoUri == null) {
-            fail("共有動画を開けませんでした。")
-            return
-        }
+        if (videoUri == null) return fail("共有動画を開けませんでした。")
         processForPlayback(videoUri, baseName)
     }
 
@@ -111,29 +98,22 @@ class SharedPlaybackActivity : Activity() {
     private fun buildProcessingUi() {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(24), dp(28), dp(24), dp(28))
         }
-        root.addView(TextView(this).apply {
-            text = "字幕付き再生を準備中"
-            textSize = 22f
-        })
+        root.addView(TextView(this).apply { text = "字幕付き再生を準備中"; textSize = 22f })
         statusText = TextView(this).apply {
             text = "共有動画を解析します。"
             textSize = 14f
             setPadding(0, dp(14), 0, dp(14))
         }
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            progress = 0
-        }
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 0 }
         root.addView(statusText)
         root.addView(progress)
         root.addView(TextView(this).apply {
-            text = "動画フォルダには保存しません。処理中だけアプリの一時領域を使用します。"
+            text = "動画フォルダには保存しません。視聴用の軽量Whisperモデルを使用します。"
             textSize = 12f
             setPadding(0, dp(10), 0, dp(10))
         })
@@ -150,23 +130,16 @@ class SharedPlaybackActivity : Activity() {
     private fun processForPlayback(videoUri: Uri, baseName: String) {
         worker.execute {
             runCatching {
-                val spec = settings.whisperModel
-                if (!modelManager.isReady(spec)) {
-                    runOnUiThread { setProgress(1, "初回のみWhisperモデルを準備します: ${spec.displayName}") }
-                    val control = WhisperModelManager.DownloadControl()
-                    modelManager.download(spec, control) { state ->
-                        runOnUiThread {
-                            val mapped = (state.percent * 20) / 100
-                            setProgress(mapped, "Whisperモデルを準備中: ${state.percent}%")
-                        }
+                if (!modelManager.isReady(PLAYBACK_MODEL)) {
+                    runOnUiThread { setProgress(1, "初回のみ高速視聴モデルを準備します（約60MB）") }
+                    modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
+                        runOnUiThread { setProgress((state.percent * 20) / 100, "高速視聴モデルを準備中: ${state.percent}%") }
                     }
                 }
-
                 val source = transcribe(videoUri)
                 saveSource(source)
                 val translated = translateForPlayback(source)
                 saveTranslated(translated)
-
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString("videoUri", videoUri.toString())
                     .putString("baseName", baseName)
@@ -179,45 +152,36 @@ class SharedPlaybackActivity : Activity() {
                     showPlayer(videoUri, translated)
                 }
             }.onFailure { error ->
-                runOnUiThread {
-                    fail("字幕付き再生の準備に失敗しました: ${error.message ?: error.javaClass.simpleName}")
-                }
+                runOnUiThread { fail("字幕付き再生の準備に失敗しました: ${error.message ?: error.javaClass.simpleName}") }
             }
         }
     }
 
     private fun transcribe(uri: Uri): List<SubtitleEntry> {
-        val spec = settings.whisperModel
         val all = mutableListOf<SubtitleEntry>()
-        WhisperEngine(modelManager.modelFile(spec)).use { whisper ->
+        WhisperEngine(modelManager.modelFile(PLAYBACK_MODEL)).use { whisper ->
             AudioChunkDecoder(this).decode(
                 uri = uri,
                 chunkSeconds = WHISPER_CHUNK_SECONDS,
-                onProgress = { percent ->
-                    runOnUiThread {
-                        val mapped = 20 + (percent * 20) / 100
-                        setProgress(mapped, "音声を読み取り中: $percent%")
-                    }
-                },
+                onProgress = { percent -> runOnUiThread {
+                    setProgress(20 + (percent * 20) / 100, "音声を読み取り中: $percent%")
+                } },
             ) { samples, chunkStartMs ->
-                val windows = if (settings.vadEnabled) SimpleVad.split(samples)
-                else listOf(SimpleVad.SpeechWindow(samples, 0L))
+                val windows = SimpleVad.split(samples)
                 windows.forEachIndexed { index, window ->
                     val absoluteStartMs = chunkStartMs + window.offsetMs
                     val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
-                    val displayProgress = (45 + (chunkNumber - 1) * 5).coerceAtMost(75)
                     runOnUiThread {
                         setProgress(
-                            displayProgress,
-                            "Whisperで字幕を作成中: ${formatPosition(absoluteStartMs)}付近 / 区間 $chunkNumber" +
-                                if (settings.vadEnabled) " / 音声 ${index + 1}/${windows.size}" else "",
+                            (45 + (chunkNumber - 1) * 5).coerceAtMost(75),
+                            "Whisperで字幕を作成中: ${formatPosition(absoluteStartMs)}付近 / 区間 $chunkNumber / 音声 ${index + 1}/${windows.size}",
                         )
                     }
                     all += whisper.transcribe(
                         samples = window.samples,
                         chunkStartMs = absoluteStartMs,
                         language = settings.recognitionLanguageCode,
-                        wordTiming = settings.wordTimingEnabled,
+                        wordTiming = false,
                     )
                 }
             }
@@ -231,23 +195,14 @@ class SharedPlaybackActivity : Activity() {
         return normalized
     }
 
-    private fun translateForPlayback(source: List<SubtitleEntry>): List<SubtitleEntry> {
-        return try {
-            LocalTranslator(settings.recognitionLanguageCode, settings.targetLanguageCode).use { translator ->
-                translator.translate(source) { percent ->
-                    runOnUiThread {
-                        setProgress(80 + (percent * 19) / 100, "${settings.targetLanguageLabel}字幕を準備中: $percent%")
-                    }
-                }
-            }
-        } catch (error: IllegalArgumentException) {
-            if (error.message?.contains("元言語と翻訳先が同じ") == true) {
-                runOnUiThread { setProgress(99, "音声が翻訳先と同じため、認識字幕をそのまま表示します。") }
-                source
-            } else {
-                throw error
-            }
+    private fun translateForPlayback(source: List<SubtitleEntry>): List<SubtitleEntry> = try {
+        LocalTranslator(settings.recognitionLanguageCode, settings.targetLanguageCode).use { translator ->
+            translator.translate(source) { percent -> runOnUiThread {
+                setProgress(80 + (percent * 19) / 100, "${settings.targetLanguageLabel}字幕を準備中: $percent%")
+            } }
         }
+    } catch (error: IllegalArgumentException) {
+        if (error.message?.contains("元言語と翻訳先が同じ") == true) source else throw error
     }
 
     private fun saveSource(entries: List<SubtitleEntry>) {
@@ -265,70 +220,35 @@ class SharedPlaybackActivity : Activity() {
     private fun showPlayer(videoUri: Uri, entries: List<SubtitleEntry>) {
         subtitleEntries = entries
         lastSubtitleIndex = -2
-
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
-
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val playerView = PlayerView(this).apply {
             useController = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
         }
-        root.addView(
-            playerView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ),
-        )
-
+        root.addView(playerView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         subtitleView = TextView(this).apply {
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             textSize = 20f * settings.subtitleTextScale
             maxLines = settings.maxLines
             setPadding(dp(14), dp(6), dp(14), dp(6))
-            if (settings.shadowPercent > 0) {
-                setShadowLayer(1f + settings.shadowPercent / 25f, 0f, 2f, Color.BLACK)
-            }
+            if (settings.shadowPercent > 0) setShadowLayer(1f + settings.shadowPercent / 25f, 0f, 2f, Color.BLACK)
         }
-        val bottomMargin = (resources.displayMetrics.heightPixels *
-            (settings.subtitleBottomMarginPercent / 100f)).toInt().coerceAtLeast(dp(24))
-        root.addView(
-            subtitleView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-            ).apply {
-                marginStart = dp(12)
-                marginEnd = dp(12)
-                this.bottomMargin = bottomMargin
-            },
-        )
-
+        val bottomMargin = (resources.displayMetrics.heightPixels * (settings.subtitleBottomMarginPercent / 100f)).toInt().coerceAtLeast(dp(24))
+        root.addView(subtitleView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            marginStart = dp(12); marginEnd = dp(12); this.bottomMargin = bottomMargin
+        })
         val editButton = Button(this).apply {
             text = "保存・編集"
             isAllCaps = false
-            setOnClickListener {
-                player?.pause()
-                startActivity(Intent(this@SharedPlaybackActivity, MainActivity::class.java))
-            }
+            setOnClickListener { player?.pause(); startActivity(Intent(this@SharedPlaybackActivity, MainActivity::class.java)) }
         }
-        root.addView(
-            editButton,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.END,
-            ).apply {
-                topMargin = dp(12)
-                marginEnd = dp(12)
-            },
-        )
-
+        root.addView(editButton, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(12); marginEnd = dp(12)
+        })
         setContentView(root)
-
         player = ExoPlayer.Builder(this).build().also { exoPlayer ->
             playerView.player = exoPlayer
             exoPlayer.setMediaItem(MediaItem.fromUri(videoUri))
@@ -363,9 +283,7 @@ class SharedPlaybackActivity : Activity() {
 
     private fun formatPosition(positionMs: Long): String {
         val totalSeconds = (positionMs / 1000L).coerceAtLeast(0L)
-        val minutes = totalSeconds / 60L
-        val seconds = totalSeconds % 60L
-        return "%d:%02d".format(minutes, seconds)
+        return "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L)
     }
 
     private fun setProgress(value: Int, message: String) {
