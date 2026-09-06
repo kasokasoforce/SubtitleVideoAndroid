@@ -15,7 +15,6 @@ import android.os.Messenger
 import android.os.PowerManager
 import android.os.RemoteException
 import androidx.core.app.NotificationCompat
-import dev.oai.subtitlevideo.asr.SystemSpeechRecognizerTranscriber
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
 import dev.oai.subtitlevideo.model.WhisperModelManager
 import dev.oai.subtitlevideo.model.WhisperModelSpec
@@ -43,7 +42,9 @@ class WhisperProcessingService : Service() {
         private const val PREFS = "current_project"
         private const val CHANNEL_ID = "shared_whisper_processing"
         private const val NOTIFICATION_ID = 2410
-        private const val WHISPER_CHUNK_SECONDS = 60
+        // Match the fast v0.1 transcription shape: long chunks, one Whisper call for short videos.
+        private const val WHISPER_CHUNK_SECONDS = 300
+        private const val WHISPER_MAX_THREADS = 8
         private val PLAYBACK_MODEL = WhisperModelSpec.TINY_Q5
     }
 
@@ -102,7 +103,7 @@ class WhisperProcessingService : Service() {
         worker.execute {
             runCatching {
                 val settings = AppSettings.load(this)
-                val source = transcribeFastOrWhisper(videoUri, settings)
+                val source = transcribeWhisperDirect(videoUri, settings)
                 saveSource(source)
                 updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
                 val translated = translate(source, settings)
@@ -123,35 +124,15 @@ class WhisperProcessingService : Service() {
         }
     }
 
-    private fun transcribeFastOrWhisper(uri: Uri, settings: AppSettings): List<SubtitleEntry> {
-        if (SystemSpeechRecognizerTranscriber.isUsable(this)) {
-            updateProgress(3, "高速経路: Android音声認識を試します")
-            val fastResult = runCatching {
-                SystemSpeechRecognizerTranscriber(this).transcribe(
-                    uri = uri,
-                    languageCode = settings.recognitionLanguageCode,
-                ) { percent, message -> updateProgress(percent.coerceAtMost(78), message) }
-            }
-            if (fastResult.isSuccess) {
-                val entries = fastResult.getOrThrow()
-                updateProgress(80, "高速音声認識が完了しました: ${entries.size}字幕")
-                return entries
-            }
-            updateProgress(
-                4,
-                "高速音声認識を使えなかったためWhisperへ切替: ${fastResult.exceptionOrNull()?.message ?: "非対応"}",
-            )
-        } else {
-            updateProgress(2, "この端末では高速音声認識を使えないためWhisperへ切り替えます")
-        }
-
+    private fun transcribeWhisperDirect(uri: Uri, settings: AppSettings): List<SubtitleEntry> {
         val modelManager = WhisperModelManager(this)
         if (!modelManager.isReady(PLAYBACK_MODEL)) {
-            updateProgress(5, "フォールバック用Whisperモデルを準備します（約32MB）")
+            updateProgress(5, "Whisperモデルを準備します（約32MB）")
             modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
                 updateProgress((state.percent * 15) / 100, "Whisperモデルを準備中: ${state.percent}%")
             }
         }
+        updateProgress(16, "高速Whisper経路で字幕を作成します")
         return transcribeWhisper(uri, settings, modelManager)
     }
 
@@ -166,7 +147,7 @@ class WhisperProcessingService : Service() {
                 uri = uri,
                 chunkSeconds = WHISPER_CHUNK_SECONDS,
                 onProgress = { percent ->
-                    updateProgress(15 + (percent * 10) / 100, "Whisper用音声を読み取り中: $percent%")
+                    updateProgress(16 + (percent * 10) / 100, "Whisper用音声を読み取り中: $percent%")
                 },
             ) { samples, chunkStartMs ->
                 val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
@@ -179,7 +160,7 @@ class WhisperProcessingService : Service() {
                     chunkStartMs = chunkStartMs,
                     language = settings.recognitionLanguageCode,
                     wordTiming = false,
-                    maxThreads = 4,
+                    maxThreads = WHISPER_MAX_THREADS,
                 )
             }
         }
