@@ -17,6 +17,7 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.google.mlkit.common.MlKit
 import dev.oai.subtitlevideo.asr.SystemSpeechRecognizerTranscriber
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
 import dev.oai.subtitlevideo.model.WhisperModelManager
@@ -84,6 +85,7 @@ class WhisperProcessingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        MlKit.initialize(applicationContext)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "共有動画の字幕処理", NotificationManager.IMPORTANCE_LOW)
         )

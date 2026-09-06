@@ -27,7 +27,7 @@ class SubtitleCanvasOverlay(
     override fun onDraw(canvas: Canvas, presentationTimeUs: Long) {
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
         val item = findActive(presentationTimeUs / 1000L) ?: return
-        val textSize = max(24f, canvas.height * 0.040f * settings.subtitleTextScale)
+        val textSize = max(14f, canvas.height * 0.040f * settings.subtitleTextScale)
         paint.textSize = textSize
         val shadowStrength = settings.shadowPercent / 100f
         if (shadowStrength > 0f) {

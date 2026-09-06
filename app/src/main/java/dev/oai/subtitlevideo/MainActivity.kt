@@ -265,7 +265,7 @@ class MainActivity : Activity() {
             return SliderRow(seek, value)
         }
 
-        val size = slider("字幕サイズ", 90, ((settings.subtitleTextScale - 0.7f) * 100).toInt())
+        val size = slider("字幕サイズ", 12, ((settings.subtitleTextScale - 0.4f) * 10).toInt())
         val position = slider("字幕位置（下から）", 18, settings.subtitleBottomMarginPercent - 2)
         val lineChars = slider("1行の最大文字数", 28, settings.maxLineChars - 12)
         val lines = slider("最大行数", 2, settings.maxLines - 1)
@@ -273,7 +273,7 @@ class MainActivity : Activity() {
         val seconds = slider("1字幕の最大表示時間", 13, ((settings.maxEventSeconds - 1.5) * 2).toInt())
 
         fun updatePreview() {
-            val textScale = 0.7f + size.seek.progress / 100f
+            val textScale = 0.4f + size.seek.progress / 10f
             val bottom = 2 + position.seek.progress
             val chars = 12 + lineChars.seek.progress
             val maxLines = 1 + lines.seek.progress
@@ -328,7 +328,7 @@ class MainActivity : Activity() {
                     whisperModel = models[modelSpinner.selectedItemPosition],
                     vadEnabled = vad.isChecked,
                     wordTimingEnabled = wordTiming.isChecked,
-                    subtitleTextScale = 0.7f + size.seek.progress / 100f,
+                    subtitleTextScale = 0.4f + size.seek.progress / 10f,
                     subtitleBottomMarginPercent = 2 + position.seek.progress,
                     maxLineChars = 12 + lineChars.seek.progress,
                     maxLines = 1 + lines.seek.progress,
