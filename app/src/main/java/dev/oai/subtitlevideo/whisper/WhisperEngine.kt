@@ -13,8 +13,8 @@ class WhisperEngine(modelFile: File) : Closeable {
         samples: FloatArray,
         chunkStartMs: Long,
         language: String = "zh",
-        wordTiming: Boolean = true,
-        maxThreads: Int = 4,
+        wordTiming: Boolean = false,
+        maxThreads: Int = 8,
     ): List<SubtitleEntry> {
         check(handle != 0L) { "Whisperは既に終了しています" }
         val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, maxThreads.coerceAtLeast(2))

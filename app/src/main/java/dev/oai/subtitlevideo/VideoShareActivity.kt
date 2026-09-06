@@ -24,6 +24,7 @@ import java.util.concurrent.Executors
 class VideoShareActivity : Activity() {
     companion object {
         private const val PREFS = "current_project"
+        private const val COPY_BUFFER_BYTES = 4 * 1024 * 1024
     }
 
     private data class ImportedVideo(val uri: Uri, val baseName: String)
@@ -101,7 +102,7 @@ class VideoShareActivity : Activity() {
 
                 contentResolver.openInputStream(source)?.use { input ->
                     FileOutputStream(temp).use { output ->
-                        val buffer = ByteArray(1024 * 1024)
+                        val buffer = ByteArray(COPY_BUFFER_BYTES)
                         var copied = 0L
                         while (true) {
                             val count = input.read(buffer)
@@ -119,7 +120,6 @@ class VideoShareActivity : Activity() {
                                 runOnUiThread { status.text = "準備中: ${formatMb(copied)} MB" }
                             }
                         }
-                        output.fd.sync()
                     }
                 } ?: error("共有動画を開けませんでした")
 

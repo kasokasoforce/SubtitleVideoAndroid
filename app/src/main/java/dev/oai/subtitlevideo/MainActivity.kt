@@ -239,7 +239,7 @@ class MainActivity : Activity() {
         val modelSpinner = spinner("Whisperモデル", models.map { it.displayName }, models.indexOf(settings.whisperModel))
 
         val wordTiming = CheckBox(this).apply {
-            text = "単語タイムスタンプで自然に字幕を分割（推奨）"
+            text = "高精度分割: 単語タイムスタンプを使う（遅くなります）"
             isChecked = settings.wordTimingEnabled
         }
         val vad = CheckBox(this).apply {
@@ -481,6 +481,7 @@ class MainActivity : Activity() {
                                 chunkStartMs = chunkStartMs + window.offsetMs,
                                 language = settings.recognitionLanguageCode,
                                 wordTiming = settings.wordTimingEnabled,
+                                maxThreads = 8,
                             )
                         }
                     }

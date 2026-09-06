@@ -11,8 +11,8 @@ android {
         applicationId = "dev.oai.subtitlevideo"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 5
+        versionName = "0.2.3"
         manifestPlaceholders["appLabel"] = "字幕動画メーカー"
 
         ndk {

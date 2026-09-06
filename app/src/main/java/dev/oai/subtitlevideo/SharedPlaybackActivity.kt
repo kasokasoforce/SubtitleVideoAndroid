@@ -1,12 +1,15 @@
 package dev.oai.subtitlevideo
 
+import android.Manifest
 import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -38,6 +41,7 @@ class SharedPlaybackActivity : Activity() {
     companion object {
         const val EXTRA_VIDEO_URI = "shared_video_uri"
         const val EXTRA_BASE_NAME = "shared_base_name"
+        private const val REQ_RECORD_AUDIO = 2401
     }
 
     private val subtitleHandler = Handler(Looper.getMainLooper())
@@ -123,7 +127,7 @@ class SharedPlaybackActivity : Activity() {
         }
         videoUri = parsedUri
         baseName = intent.getStringExtra(EXTRA_BASE_NAME).orEmpty().ifBlank { "shared_video" }
-        startRemoteProcessing()
+        startWithFastRecognitionPermission()
     }
 
     override fun onStop() {
@@ -151,6 +155,34 @@ class SharedPlaybackActivity : Activity() {
         }
         remoteWorker = null
         super.onDestroy()
+    }
+
+    private fun startWithFastRecognitionPermission() {
+        if (Build.VERSION.SDK_INT < 34 ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        ) {
+            startRemoteProcessing()
+            return
+        }
+
+        setProgress(0, "Android音声認識を優先するため、マイク権限を確認します。")
+        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_RECORD_AUDIO)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_RECORD_AUDIO) return
+
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            setProgress(0, "Android音声認識を優先して処理します。")
+        } else {
+            setProgress(0, "マイク権限がないため、Whisperで処理します。")
+        }
+        startRemoteProcessing()
     }
 
     private fun startRemoteProcessing() {
@@ -212,7 +244,7 @@ class SharedPlaybackActivity : Activity() {
         root.addView(statusText)
         root.addView(progress)
         root.addView(TextView(this).apply {
-            text = "旧0.1.0相当のWhisper経路で文字起こしし、日本語字幕を準備します。"
+            text = "Android音声認識を優先し、利用できない場合はWhisperへ自動で切り替えます。"
             textSize = 12f
             setPadding(0, dp(10), 0, dp(10))
         })

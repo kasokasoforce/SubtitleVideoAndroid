@@ -20,10 +20,11 @@ class AudioChunkDecoder(private val context: Context) {
     fun decode(
         uri: Uri,
         chunkSeconds: Int = DEFAULT_CHUNK_SECONDS,
+        useProcessingGuard: Boolean = true,
         onProgress: (Int) -> Unit = {},
         onChunk: (samples: FloatArray, chunkStartMs: Long) -> Unit,
     ) {
-        ProcessingGuardService.start(context, "音声解析・Whisper文字起こしを実行中")
+        if (useProcessingGuard) ProcessingGuardService.start(context, "音声解析・Whisper文字起こしを実行中")
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -118,7 +119,7 @@ class AudioChunkDecoder(private val context: Context) {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
             extractor.release()
-            ProcessingGuardService.stop(context)
+            if (useProcessingGuard) ProcessingGuardService.stop(context)
         }
     }
 

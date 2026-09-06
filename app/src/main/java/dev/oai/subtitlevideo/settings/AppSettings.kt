@@ -11,7 +11,7 @@ data class AppSettings(
     val translationMode: String = "chatgpt",
     val whisperModel: WhisperModelSpec = WhisperModelSpec.SMALL,
     val vadEnabled: Boolean = false,
-    val wordTimingEnabled: Boolean = true,
+    val wordTimingEnabled: Boolean = false,
     val subtitleTextScale: Float = 1.0f,
     val subtitleBottomMarginPercent: Int = 6,
     val maxLineChars: Int = 24,
@@ -21,9 +21,18 @@ data class AppSettings(
 ) {
     companion object {
         private const val PREFS = "app_settings"
+        private const val SPEED_DEFAULTS_VERSION = 2
 
         fun load(context: Context): AppSettings {
             val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val savedDefaultsVersion = p.getInt("speedDefaultsVersion", 0)
+            val useSpeedDefaults = savedDefaultsVersion < SPEED_DEFAULTS_VERSION
+            if (useSpeedDefaults) {
+                p.edit()
+                    .putBoolean("wordTimingEnabled", false)
+                    .putInt("speedDefaultsVersion", SPEED_DEFAULTS_VERSION)
+                    .apply()
+            }
             return AppSettings(
                 recognitionLanguageCode = p.getString("recognitionLanguageCode", "zh") ?: "zh",
                 recognitionLanguageLabel = p.getString("recognitionLanguageLabel", "中国語") ?: "中国語",
@@ -32,7 +41,7 @@ data class AppSettings(
                 translationMode = p.getString("translationMode", "chatgpt") ?: "chatgpt",
                 whisperModel = WhisperModelSpec.fromId(p.getString("whisperModel", null)),
                 vadEnabled = p.getBoolean("vadEnabled", false),
-                wordTimingEnabled = p.getBoolean("wordTimingEnabled", true),
+                wordTimingEnabled = if (useSpeedDefaults) false else p.getBoolean("wordTimingEnabled", false),
                 subtitleTextScale = p.getFloat("subtitleTextScale", 1.0f).coerceIn(0.7f, 1.6f),
                 subtitleBottomMarginPercent = p.getInt("subtitleBottomMarginPercent", 6).coerceIn(2, 20),
                 maxLineChars = p.getInt("maxLineChars", 24).coerceIn(12, 40),
@@ -53,6 +62,7 @@ data class AppSettings(
             .putString("whisperModel", whisperModel.id)
             .putBoolean("vadEnabled", vadEnabled)
             .putBoolean("wordTimingEnabled", wordTimingEnabled)
+            .putInt("speedDefaultsVersion", SPEED_DEFAULTS_VERSION)
             .putFloat("subtitleTextScale", subtitleTextScale)
             .putInt("subtitleBottomMarginPercent", subtitleBottomMarginPercent)
             .putInt("maxLineChars", maxLineChars)

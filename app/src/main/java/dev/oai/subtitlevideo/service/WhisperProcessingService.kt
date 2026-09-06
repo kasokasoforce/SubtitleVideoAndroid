@@ -17,6 +17,7 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import dev.oai.subtitlevideo.asr.SystemSpeechRecognizerTranscriber
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
 import dev.oai.subtitlevideo.model.WhisperModelManager
 import dev.oai.subtitlevideo.model.WhisperModelSpec
@@ -109,7 +110,7 @@ class WhisperProcessingService : Service() {
             val totalStarted = SystemClock.elapsedRealtime()
             runCatching {
                 val settings = AppSettings.load(this)
-                val source = transcribeWhisperDirect(videoUri)
+                val source = transcribePreferred(videoUri)
                 saveSource(source)
                 updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
                 val translationStarted = SystemClock.elapsedRealtime()
@@ -132,6 +133,29 @@ class WhisperProcessingService : Service() {
                 finishWork()
             }
         }
+    }
+
+    private fun transcribePreferred(uri: Uri): List<SubtitleEntry> {
+        if (SystemSpeechRecognizerTranscriber.isUsable(this)) {
+            updateProgress(2, "Android音声認識を優先して試します。")
+            val started = SystemClock.elapsedRealtime()
+            runCatching {
+                SystemSpeechRecognizerTranscriber(this).transcribe(
+                    uri = uri,
+                    languageCode = WHISPER_LANGUAGE,
+                    onProgress = ::updateProgress,
+                )
+            }.onSuccess { entries ->
+                Log.i(TAG, "androidSpeechRecognitionMs=${SystemClock.elapsedRealtime() - started} entries=${entries.size}")
+                return entries
+            }.onFailure { error ->
+                Log.w(TAG, "Android speech recognition failed; falling back to Whisper", error)
+                updateProgress(lastProgress, "Android音声認識を利用できないため、Whisperへ切り替えます。")
+            }
+        } else {
+            updateProgress(2, "Android音声認識を利用できないため、Whisperで処理します。")
+        }
+        return transcribeWhisperDirect(uri)
     }
 
     private fun transcribeWhisperDirect(uri: Uri): List<SubtitleEntry> {
@@ -160,6 +184,7 @@ class WhisperProcessingService : Service() {
             AudioChunkDecoder(this).decode(
                 uri = uri,
                 chunkSeconds = WHISPER_CHUNK_SECONDS,
+                useProcessingGuard = false,
                 onProgress = { percent ->
                     updateProgress(16 + (percent * 10) / 100, "Whisper用音声を読み取り中: $percent%")
                 },
