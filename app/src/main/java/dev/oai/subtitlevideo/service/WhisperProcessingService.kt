@@ -14,6 +14,8 @@ import android.os.Message
 import android.os.Messenger
 import android.os.PowerManager
 import android.os.RemoteException
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import dev.oai.subtitlevideo.audio.AudioChunkDecoder
 import dev.oai.subtitlevideo.model.WhisperModelManager
@@ -39,13 +41,16 @@ class WhisperProcessingService : Service() {
         const val KEY_PROGRESS = "progress"
         const val KEY_MESSAGE = "message"
 
+        private const val TAG = "SharedWhisper"
         private const val PREFS = "current_project"
         private const val CHANNEL_ID = "shared_whisper_processing"
         private const val NOTIFICATION_ID = 2410
-        // Match the fast v0.1 transcription shape: long chunks, one Whisper call for short videos.
+
+        // Exact v0.1 transcription parameters used by the old fast APK.
         private const val WHISPER_CHUNK_SECONDS = 300
         private const val WHISPER_MAX_THREADS = 8
-        private val PLAYBACK_MODEL = WhisperModelSpec.TINY_Q5
+        private const val WHISPER_LANGUAGE = "zh"
+        private val PLAYBACK_MODEL = WhisperModelSpec.SMALL
     }
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -101,12 +106,15 @@ class WhisperProcessingService : Service() {
 
     private fun startProcessing(videoUri: Uri, baseName: String) {
         worker.execute {
+            val totalStarted = SystemClock.elapsedRealtime()
             runCatching {
                 val settings = AppSettings.load(this)
-                val source = transcribeWhisperDirect(videoUri, settings)
+                val source = transcribeWhisperDirect(videoUri)
                 saveSource(source)
                 updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
+                val translationStarted = SystemClock.elapsedRealtime()
                 val translated = translate(source, settings)
+                Log.i(TAG, "translationMs=${SystemClock.elapsedRealtime() - translationStarted}")
                 saveTranslated(translated)
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString("videoUri", videoUri.toString())
@@ -114,7 +122,9 @@ class WhisperProcessingService : Service() {
                     .remove("outputUri")
                     .commit()
             }.onSuccess {
-                updateProgress(100, "字幕の準備が完了しました。")
+                val totalMs = SystemClock.elapsedRealtime() - totalStarted
+                Log.i(TAG, "totalMs=$totalMs")
+                updateProgress(100, "字幕の準備が完了しました。合計 ${formatElapsed(totalMs)}")
                 sendSimple(MSG_DONE)
                 finishWork()
             }.onFailure { error ->
@@ -124,25 +134,29 @@ class WhisperProcessingService : Service() {
         }
     }
 
-    private fun transcribeWhisperDirect(uri: Uri, settings: AppSettings): List<SubtitleEntry> {
+    private fun transcribeWhisperDirect(uri: Uri): List<SubtitleEntry> {
         val modelManager = WhisperModelManager(this)
         if (!modelManager.isReady(PLAYBACK_MODEL)) {
-            updateProgress(5, "Whisperモデルを準備します（約32MB）")
+            updateProgress(5, "旧0.1.0と同じWhisper smallモデルを準備します（約488MB）")
             modelManager.download(PLAYBACK_MODEL, WhisperModelManager.DownloadControl()) { state ->
-                updateProgress((state.percent * 15) / 100, "Whisperモデルを準備中: ${state.percent}%")
+                updateProgress((state.percent * 15) / 100, "Whisper smallモデルを準備中: ${state.percent}%")
             }
         }
-        updateProgress(16, "高速Whisper経路で字幕を作成します")
-        return transcribeWhisper(uri, settings, modelManager)
+        val processors = Runtime.getRuntime().availableProcessors()
+        updateProgress(16, "旧0.1.0互換経路: small / 300秒 / CPU $processors / 最大8スレッド")
+        Log.i(TAG, "availableProcessors=$processors model=${PLAYBACK_MODEL.id} chunkSeconds=$WHISPER_CHUNK_SECONDS maxThreads=$WHISPER_MAX_THREADS")
+        return transcribeWhisper(uri, modelManager)
     }
 
     private fun transcribeWhisper(
         uri: Uri,
-        settings: AppSettings,
         modelManager: WhisperModelManager,
     ): List<SubtitleEntry> {
         val all = mutableListOf<SubtitleEntry>()
+        val modelLoadStarted = SystemClock.elapsedRealtime()
         WhisperEngine(modelManager.modelFile(PLAYBACK_MODEL)).use { whisper ->
+            Log.i(TAG, "modelLoadMs=${SystemClock.elapsedRealtime() - modelLoadStarted}")
+            val decodeStarted = SystemClock.elapsedRealtime()
             AudioChunkDecoder(this).decode(
                 uri = uri,
                 chunkSeconds = WHISPER_CHUNK_SECONDS,
@@ -150,18 +164,22 @@ class WhisperProcessingService : Service() {
                     updateProgress(16 + (percent * 10) / 100, "Whisper用音声を読み取り中: $percent%")
                 },
             ) { samples, chunkStartMs ->
+                val decodeMs = SystemClock.elapsedRealtime() - decodeStarted
+                Log.i(TAG, "audioReadyMs=$decodeMs samples=${samples.size} chunkStartMs=$chunkStartMs")
                 val chunkNumber = (chunkStartMs / (WHISPER_CHUNK_SECONDS * 1000L)).toInt() + 1
                 updateProgress(
                     (28 + (chunkNumber - 1) * 8).coerceAtMost(80),
-                    "Whisperで字幕を作成中: ${formatPosition(chunkStartMs)}付近 / 区間 $chunkNumber",
+                    "旧0.1.0互換Whisperで文字起こし中: ${formatPosition(chunkStartMs)}付近 / 区間 $chunkNumber",
                 )
+                val inferenceStarted = SystemClock.elapsedRealtime()
                 all += whisper.transcribe(
                     samples = samples,
                     chunkStartMs = chunkStartMs,
-                    language = settings.recognitionLanguageCode,
+                    language = WHISPER_LANGUAGE,
                     wordTiming = false,
                     maxThreads = WHISPER_MAX_THREADS,
                 )
+                Log.i(TAG, "whisperInferenceMs=${SystemClock.elapsedRealtime() - inferenceStarted} chunk=$chunkNumber")
             }
         }
         return all
@@ -172,7 +190,7 @@ class WhisperProcessingService : Service() {
     }
 
     private fun translate(source: List<SubtitleEntry>, settings: AppSettings): List<SubtitleEntry> = try {
-        LocalTranslator(settings.recognitionLanguageCode, settings.targetLanguageCode).use { translator ->
+        LocalTranslator(WHISPER_LANGUAGE, settings.targetLanguageCode).use { translator ->
             translator.translate(source) { percent ->
                 updateProgress(82 + (percent * 17) / 100, "${settings.targetLanguageLabel}字幕を準備中: $percent%")
             }
@@ -231,5 +249,10 @@ class WhisperProcessingService : Service() {
     private fun formatPosition(positionMs: Long): String {
         val totalSeconds = (positionMs / 1000L).coerceAtLeast(0L)
         return "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L)
+    }
+
+    private fun formatElapsed(elapsedMs: Long): String {
+        val seconds = elapsedMs / 1000L
+        return "%d:%02d".format(seconds / 60L, seconds % 60L)
     }
 }
