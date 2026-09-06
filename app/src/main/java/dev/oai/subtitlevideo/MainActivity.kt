@@ -42,6 +42,7 @@ import java.util.concurrent.Executors
 @UnstableApi
 class MainActivity : Activity() {
     companion object {
+        const val EXTRA_START_CHATGPT_TRANSLATION = "start_chatgpt_translation"
         private const val REQ_VIDEO = 1001
         private const val REQ_TRANSLATED_SRT = 1002
         private const val PREFS = "current_project"
@@ -656,7 +657,13 @@ class MainActivity : Activity() {
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND || sourceEntries == null) return
+        if (intent == null || sourceEntries == null) return
+        if (intent.getBooleanExtra(EXTRA_START_CHATGPT_TRANSLATION, false)) {
+            intent.removeExtra(EXTRA_START_CHATGPT_TRANSLATION)
+            window.decorView.post { shareForTranslation() }
+            return
+        }
+        if (intent.action != Intent.ACTION_SEND) return
         val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
         if (!sharedText.isNullOrBlank() && sharedText.contains("-->")) {
             importTranslatedText(sharedText)

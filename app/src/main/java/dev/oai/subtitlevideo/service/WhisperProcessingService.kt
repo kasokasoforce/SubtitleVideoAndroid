@@ -37,6 +37,7 @@ class WhisperProcessingService : Service() {
         const val MSG_PROGRESS = 2
         const val MSG_DONE = 3
         const val MSG_ERROR = 4
+        const val MSG_CHATGPT_READY = 5
 
         const val KEY_VIDEO_URI = "videoUri"
         const val KEY_BASE_NAME = "baseName"
@@ -114,21 +115,31 @@ class WhisperProcessingService : Service() {
                 val settings = AppSettings.load(this)
                 val source = transcribePreferred(videoUri)
                 saveSource(source)
-                updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
-                val translationStarted = SystemClock.elapsedRealtime()
-                val translated = translate(source, settings)
-                Log.i(TAG, "translationMs=${SystemClock.elapsedRealtime() - translationStarted}")
-                saveTranslated(translated)
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString("videoUri", videoUri.toString())
                     .putString("baseName", baseName)
                     .remove("outputUri")
                     .commit()
-            }.onSuccess {
+                if (settings.translationMode == "chatgpt") {
+                    true
+                } else {
+                    updateProgress(82, "字幕を${settings.targetLanguageLabel}へ翻訳します。")
+                    val translationStarted = SystemClock.elapsedRealtime()
+                    val translated = translate(source, settings)
+                    Log.i(TAG, "translationMs=${SystemClock.elapsedRealtime() - translationStarted}")
+                    saveTranslated(translated)
+                    false
+                }
+            }.onSuccess { needsChatGpt ->
                 val totalMs = SystemClock.elapsedRealtime() - totalStarted
                 Log.i(TAG, "totalMs=$totalMs")
-                updateProgress(100, "字幕の準備が完了しました。合計 ${formatElapsed(totalMs)}")
-                sendSimple(MSG_DONE)
+                if (needsChatGpt) {
+                    updateProgress(100, "文字起こしが完了しました。ChatGPTへ移動します。")
+                    sendSimple(MSG_CHATGPT_READY)
+                } else {
+                    updateProgress(100, "字幕の準備が完了しました。合計 ${formatElapsed(totalMs)}")
+                    sendSimple(MSG_DONE)
+                }
                 finishWork()
             }.onFailure { error ->
                 sendError("字幕付き再生の準備に失敗しました: ${error.message ?: error.javaClass.simpleName}")

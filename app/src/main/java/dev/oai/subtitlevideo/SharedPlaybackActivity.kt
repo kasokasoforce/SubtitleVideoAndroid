@@ -75,6 +75,11 @@ class SharedPlaybackActivity : Activity() {
                 loadResultAndPlay()
                 true
             }
+            WhisperProcessingService.MSG_CHATGPT_READY -> {
+                processingFinished = true
+                openChatGptTranslation()
+                true
+            }
             WhisperProcessingService.MSG_ERROR -> {
                 processingFinished = true
                 fail(message.data.getString(WhisperProcessingService.KEY_MESSAGE) ?: "字幕処理に失敗しました。")
@@ -221,6 +226,15 @@ class SharedPlaybackActivity : Activity() {
         }.onFailure { error ->
             fail("字幕結果を読み込めませんでした: ${error.message ?: error.javaClass.simpleName}")
         }
+    }
+
+    private fun openChatGptTranslation() {
+        setProgress(100, "文字起こしが完了しました。ChatGPTへ移動します。")
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_START_CHATGPT_TRANSLATION, true),
+        )
+        finish()
     }
 
     private fun buildProcessingUi() {
